@@ -41,12 +41,18 @@ const RETRY_DELAY = 3000;
 
 
 /*
- * Maximum video size.
+ * Maximum media size.
  *
- * Videos larger than this are skipped
- * WITHOUT downloading them.
+ * Any media larger than this is skipped
+ * WITHOUT downloading it.
+ *
+ * This applies to:
+ *
+ * - photos
+ * - videos
+ * - voices
  */
-const MAX_VIDEO_SIZE =
+const MAX_MEDIA_SIZE =
     10 * 1024 * 1024;
 
 
@@ -137,10 +143,8 @@ function isTelegramSticker(
     return attributes.some(
         (attribute) =>
             attribute &&
-            (
-                attribute.className ===
+            attribute.className ===
                 "DocumentAttributeSticker"
-            )
     );
 }
 
@@ -149,8 +153,8 @@ function isTelegramSticker(
  * Check whether the Telegram message is an
  * animated media / GIF.
  *
- * Telegram GIFs are generally represented as
- * animated documents.
+ * Telegram defines DocumentAttributeAnimated
+ * for animated GIF media.
  */
 function isTelegramAnimation(
     telegramMessage
@@ -164,10 +168,8 @@ function isTelegramAnimation(
     return attributes.some(
         (attribute) =>
             attribute &&
-            (
-                attribute.className ===
+            attribute.className ===
                 "DocumentAttributeAnimated"
-            )
     );
 }
 
@@ -528,6 +530,24 @@ async function uploadMediaWithRetry({
             }
 
 
+            /*
+             * Final protection before B2 upload.
+             *
+             * No media larger than 10 MB should
+             * ever reach B2.
+             */
+            if (
+                stats.size >
+                MAX_MEDIA_SIZE
+            ) {
+                throw new Error(
+                    `File exceeds maximum media size: ` +
+                    `${formatBytes(stats.size)} > ` +
+                    `${formatBytes(MAX_MEDIA_SIZE)}`
+                );
+            }
+
+
             console.log(
                 `Uploading to B2 ` +
                 `(attempt ${attempt}/${MAX_RETRIES})...`
@@ -816,21 +836,30 @@ async function processMedia(
 
 
     /*
-     * We already know the Telegram document
-     * size from archive-messages.js.
+     * IMPORTANT:
      *
-     * Therefore, if the video is too large,
-     * DO NOT download it.
+     * Maximum size now applies to ALL media:
+     *
+     * - photo
+     * - video
+     * - voice
+     *
+     * If MongoDB already knows the Telegram
+     * file size, skip BEFORE downloading.
      */
+    const storedMediaSize =
+        Number(
+            message.media.size || 0
+        );
+
+
     if (
-        mediaType === "video" &&
-        message.media.size &&
-        message.media.size >
-        MAX_VIDEO_SIZE
+        storedMediaSize >
+        MAX_MEDIA_SIZE
     ) {
         console.log(
-            `Skipping large video before download: ` +
-            `${formatBytes(message.media.size)}`
+            `Skipping large ${mediaType} before download: ` +
+            `${formatBytes(storedMediaSize)}`
         );
 
 
@@ -949,20 +978,20 @@ async function processMedia(
 
 
         /*
-         * Safety check:
+         * IMPORTANT:
          *
-         * Telegram's stored size might not have
-         * been available for some reason.
+         * Final safety check for ALL media.
          *
-         * Therefore we still check after download.
+         * This protects us if Telegram's stored
+         * media.size was missing or incorrect.
          */
         if (
-            mediaType === "video" &&
             fileStats.size >
-            MAX_VIDEO_SIZE
+            MAX_MEDIA_SIZE
         ) {
             console.log(
-                `Video is too large: ${formatBytes(fileStats.size)}`
+                `Media is too large: ` +
+                `${formatBytes(fileStats.size)}`
             );
 
 
@@ -1169,6 +1198,11 @@ async function processMediaConcurrently(
 
             console.log(
                 `MIME: ${message.media.mimeType || "unknown"}`
+            );
+
+
+            console.log(
+                `Size: ${formatBytes(Number(message.media.size || 0))}`
             );
 
 
