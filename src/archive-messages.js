@@ -1,11 +1,21 @@
 require("dotenv").config();
 
 const mongoose = require("mongoose");
-const { getTelegramClient } = require("./telegram");
-const connectDB = require("./database/mongodb");
 
-const Chat = require("./database/models/Chat");
-const Message = require("./database/models/Message");
+const {
+    getTelegramClient,
+} = require("./telegram");
+
+const {
+    connectToDatabase,
+} = require("./database/mongodb");
+
+const Chat =
+    require("./database/models/Chat");
+
+const Message =
+    require("./database/models/Message");
+
 
 const INITIAL_ARCHIVE_DAYS = Number(
     process.env.INITIAL_ARCHIVE_DAYS || 730
@@ -16,67 +26,93 @@ const MESSAGE_BATCH_SIZE = Math.min(
     100
 );
 
-const MAX_RETRIES = Number(process.env.MESSAGE_MAX_RETRIES || 5);
-const RETRY_DELAY_MS = Number(process.env.MESSAGE_RETRY_DELAY_MS || 3000);
+const MAX_RETRIES = Number(
+    process.env.MESSAGE_MAX_RETRIES || 5
+);
 
-const MAX_MEDIA_SIZE = 10 * 1024 * 1024;
+const RETRY_DELAY_MS = Number(
+    process.env.MESSAGE_RETRY_DELAY_MS || 3000
+);
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const MAX_MEDIA_SIZE =
+    10 * 1024 * 1024;
+
+
+const sleep = (ms) =>
+    new Promise((resolve) => {
+        setTimeout(resolve, ms);
+    });
+
 
 function getHistoryStartDate() {
     const date = new Date();
 
     date.setUTCDate(
-        date.getUTCDate() - INITIAL_ARCHIVE_DAYS
+        date.getUTCDate() -
+        INITIAL_ARCHIVE_DAYS
     );
 
     return date;
 }
+
 
 function getMessageDate(message) {
     if (!message?.date) {
         return null;
     }
 
-    return new Date(Number(message.date) * 1000);
+    return new Date(
+        Number(message.date) * 1000
+    );
 }
+
 
 function isWebm(message) {
     const fileName =
         message?.media?.document?.attributes?.find(
             (attribute) =>
-                attribute?.className === "DocumentAttributeFilename"
+                attribute?.className ===
+                "DocumentAttributeFilename"
         )?.fileName || "";
 
     const mimeType =
         message?.media?.document?.mimeType || "";
 
     return (
-        mimeType.toLowerCase() === "video/webm" ||
-        fileName.toLowerCase().endsWith(".webm")
+        mimeType.toLowerCase() ===
+            "video/webm" ||
+        fileName
+            .toLowerCase()
+            .endsWith(".webm")
     );
 }
+
 
 function isSticker(message) {
     return Boolean(
         message?.media?.document?.attributes?.some(
             (attribute) =>
-                attribute?.className === "DocumentAttributeSticker"
+                attribute?.className ===
+                "DocumentAttributeSticker"
         )
     );
 }
+
 
 function isAnimation(message) {
     return Boolean(
         message?.media?.document?.attributes?.some(
             (attribute) =>
-                attribute?.className === "DocumentAttributeAnimated"
+                attribute?.className ===
+                "DocumentAttributeAnimated"
         )
     );
 }
 
+
 function getDocumentSize(message) {
-    const document = message?.media?.document;
+    const document =
+        message?.media?.document;
 
     if (!document?.size) {
         return null;
@@ -85,27 +121,47 @@ function getDocumentSize(message) {
     return Number(document.size);
 }
 
-function getPhotoSize(message) {
-    const sizes = message?.media?.photo?.sizes;
 
-    if (!Array.isArray(sizes) || sizes.length === 0) {
+function getPhotoSize(message) {
+    const sizes =
+        message?.media?.photo?.sizes;
+
+    if (
+        !Array.isArray(sizes) ||
+        sizes.length === 0
+    ) {
         return null;
     }
 
     let maxSize = 0;
 
     for (const size of sizes) {
-        if (size?.className === "PhotoSize") {
-            maxSize = Math.max(maxSize, Number(size.size || 0));
+        if (
+            size?.className ===
+            "PhotoSize"
+        ) {
+            maxSize = Math.max(
+                maxSize,
+                Number(size.size || 0)
+            );
         }
 
-        if (size?.className === "PhotoCachedSize") {
-            maxSize = Math.max(maxSize, Number(size.bytes?.length || 0));
+        if (
+            size?.className ===
+            "PhotoCachedSize"
+        ) {
+            maxSize = Math.max(
+                maxSize,
+                Number(
+                    size.bytes?.length || 0
+                )
+            );
         }
     }
 
     return maxSize || null;
 }
+
 
 function getMediaInfo(message) {
     if (!message?.media) {
@@ -149,9 +205,13 @@ function getMediaInfo(message) {
     }
 
     if (message.media?.photo) {
-        const size = getPhotoSize(message);
+        const size =
+            getPhotoSize(message);
 
-        if (size && size > MAX_MEDIA_SIZE) {
+        if (
+            size &&
+            size > MAX_MEDIA_SIZE
+        ) {
             return {
                 type: "photo",
                 size,
@@ -171,28 +231,43 @@ function getMediaInfo(message) {
     }
 
     if (message.media?.document) {
-        const document = message.media.document;
+        const document =
+            message.media.document;
 
-        const size = getDocumentSize(message);
-        const mimeType = document.mimeType || null;
+        const size =
+            getDocumentSize(message);
+
+        const mimeType =
+            document.mimeType || null;
 
         const isVoice =
             document.attributes?.some(
                 (attribute) =>
-                    attribute?.className === "DocumentAttributeAudio" &&
+                    attribute?.className ===
+                        "DocumentAttributeAudio" &&
                     attribute?.voice === true
             ) || false;
 
         const isVideo =
-            mimeType?.startsWith("video/") ||
+            mimeType?.startsWith(
+                "video/"
+            ) ||
             document.attributes?.some(
                 (attribute) =>
-                    attribute?.className === "DocumentAttributeVideo"
+                    attribute?.className ===
+                    "DocumentAttributeVideo"
             );
 
-        if (size && size > MAX_MEDIA_SIZE) {
+        if (
+            size &&
+            size > MAX_MEDIA_SIZE
+        ) {
             return {
-                type: isVoice ? "voice" : isVideo ? "video" : null,
+                type: isVoice
+                    ? "voice"
+                    : isVideo
+                        ? "video"
+                        : null,
                 size,
                 mimeType,
                 status: "skipped",
@@ -230,62 +305,117 @@ function getMediaInfo(message) {
     };
 }
 
-function getSenderId(message, fallbackChatId) {
-    if (message?.senderId !== undefined && message.senderId !== null) {
+
+function getSenderId(
+    message,
+    fallbackChatId
+) {
+    if (
+        message?.senderId !== undefined &&
+        message?.senderId !== null
+    ) {
         return String(message.senderId);
     }
 
-    if (message?.fromId?.userId !== undefined) {
-        return String(message.fromId.userId);
+    if (
+        message?.fromId?.userId !== undefined
+    ) {
+        return String(
+            message.fromId.userId
+        );
     }
 
-    if (message?.fromId?.channelId !== undefined) {
-        return String(message.fromId.channelId);
+    if (
+        message?.fromId?.channelId !== undefined
+    ) {
+        return String(
+            message.fromId.channelId
+        );
     }
 
-    if (message?.fromId?.chatId !== undefined) {
-        return String(message.fromId.chatId);
+    if (
+        message?.fromId?.chatId !== undefined
+    ) {
+        return String(
+            message.fromId.chatId
+        );
     }
 
     return String(fallbackChatId);
 }
 
-function buildMessageDocument(message, chatId, meId) {
-    const date = getMessageDate(message);
+
+function buildMessageDocument(
+    message,
+    chatId,
+    meId
+) {
+    const date =
+        getMessageDate(message);
 
     if (!date) {
         return null;
     }
 
-    const mediaInfo = getMediaInfo(message);
+    const mediaInfo =
+        getMediaInfo(message);
+
+    const senderId =
+        getSenderId(
+            message,
+            chatId
+        );
 
     return {
         telegramId: Number(message.id),
+
         chatId: String(chatId),
-        senderId: getSenderId(message, chatId),
-        text: message.message || "",
+
+        senderId,
+
+        text:
+            message.message || "",
+
         date,
+
         outgoing: Boolean(
             message.out === true ||
-            String(getSenderId(message, chatId)) === String(meId)
+            String(senderId) ===
+                String(meId)
         ),
+
         media: {
-            type: mediaInfo.type,
-            storageKey: null,
-            mimeType: mediaInfo.mimeType,
-            size: mediaInfo.size,
-            status: mediaInfo.status,
+            type:
+                mediaInfo.type,
+
+            storageKey:
+                null,
+
+            mimeType:
+                mediaInfo.mimeType,
+
+            size:
+                mediaInfo.size,
+
+            status:
+                mediaInfo.status,
         },
     };
 }
 
+
 /**
- * Save messages without overwriting existing documents.
+ * Save messages without overwriting
+ * existing documents.
  *
  * Existing messages are left untouched.
  * New messages are inserted.
  */
-async function saveMessages(messages, chatId, meId) {
+async function saveMessages(
+    messages,
+    chatId,
+    meId
+) {
     const operations = [];
 
     let skipped = 0;
@@ -301,54 +431,76 @@ async function saveMessages(messages, chatId, meId) {
             continue;
         }
 
-        const document = buildMessageDocument(
-            message,
-            chatId,
-            meId
-        );
+        const document =
+            buildMessageDocument(
+                message,
+                chatId,
+                meId
+            );
 
         if (!document) {
             skipped++;
             continue;
         }
 
-        const mediaInfo = getMediaInfo(message);
+        const mediaInfo =
+            getMediaInfo(message);
 
         if (mediaInfo.type) {
             media++;
         }
 
-        if (mediaInfo.reason === "webm") {
+        if (
+            mediaInfo.reason ===
+            "webm"
+        ) {
             webm++;
         }
 
-        if (mediaInfo.reason === "sticker") {
+        if (
+            mediaInfo.reason ===
+            "sticker"
+        ) {
             stickers++;
         }
 
-        if (mediaInfo.reason === "animation") {
+        if (
+            mediaInfo.reason ===
+            "animation"
+        ) {
             animations++;
         }
 
-        if (mediaInfo.reason === "large") {
+        if (
+            mediaInfo.reason ===
+            "large"
+        ) {
             large++;
         }
 
         operations.push({
             updateOne: {
                 filter: {
-                    chatId: String(chatId),
-                    telegramId: Number(message.id),
+                    chatId:
+                        String(chatId),
+
+                    telegramId:
+                        Number(message.id),
                 },
+
                 update: {
-                    $setOnInsert: document,
+                    $setOnInsert:
+                        document,
                 },
+
                 upsert: true,
             },
         });
     }
 
-    if (operations.length === 0) {
+    if (
+        operations.length === 0
+    ) {
         return {
             inserted: 0,
             existing: 0,
@@ -361,18 +513,26 @@ async function saveMessages(messages, chatId, meId) {
         };
     }
 
-    const result = await Message.bulkWrite(
-        operations,
-        {
-            ordered: false,
-        }
-    );
+    const result =
+        await Message.bulkWrite(
+            operations,
+            {
+                ordered: false,
+            }
+        );
 
-    const inserted = Number(result.upsertedCount || 0);
+    const inserted =
+        Number(
+            result.upsertedCount || 0
+        );
 
     return {
         inserted,
-        existing: operations.length - inserted,
+
+        existing:
+            operations.length -
+            inserted,
+
         media,
         webm,
         stickers,
@@ -382,19 +542,40 @@ async function saveMessages(messages, chatId, meId) {
     };
 }
 
+
 /**
- * Get oldest and newest stored message for a chat.
+ * Get oldest and newest stored
+ * message for a chat.
  */
-async function getChatMessageState(chatId) {
-    const [oldest, newest] = await Promise.all([
-        Message.findOne({ chatId: String(chatId) })
-            .sort({ date: 1 })
-            .select({ telegramId: 1, date: 1 })
+async function getChatMessageState(
+    chatId
+) {
+    const [
+        oldest,
+        newest,
+    ] = await Promise.all([
+        Message.findOne({
+            chatId: String(chatId),
+        })
+            .sort({
+                date: 1,
+            })
+            .select({
+                telegramId: 1,
+                date: 1,
+            })
             .lean(),
 
-        Message.findOne({ chatId: String(chatId) })
-            .sort({ telegramId: -1 })
-            .select({ telegramId: 1, date: 1 })
+        Message.findOne({
+            chatId: String(chatId),
+        })
+            .sort({
+                telegramId: -1,
+            })
+            .select({
+                telegramId: 1,
+                date: 1,
+            })
             .lean(),
     ]);
 
@@ -403,6 +584,7 @@ async function getChatMessageState(chatId) {
         newest,
     };
 }
+
 
 /**
  * Fetch one batch with retry.
@@ -414,7 +596,11 @@ async function getMessagesWithRetry(
 ) {
     let lastError = null;
 
-    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    for (
+        let attempt = 1;
+        attempt <= MAX_RETRIES;
+        attempt++
+    ) {
         try {
             return await client.getMessages(
                 entity,
@@ -423,23 +609,35 @@ async function getMessagesWithRetry(
         } catch (error) {
             lastError = error;
 
-            if (attempt >= MAX_RETRIES) {
+            if (
+                attempt >= MAX_RETRIES
+            ) {
                 break;
             }
 
-            await sleep(RETRY_DELAY_MS * attempt);
+            await sleep(
+                RETRY_DELAY_MS *
+                attempt
+            );
         }
     }
 
     throw lastError;
 }
 
+
 /**
- * Archive all messages newer than the last archived message.
+ * Archive all messages newer than
+ * the newest message already stored
+ * in MongoDB.
  *
  * IMPORTANT:
- * This function is ONLY for new messages.
- * It has nothing to do with historical backfill.
+ * MongoDB is the source of truth
+ * for the incremental archive.
+ *
+ * lastArchivedMessageId is only a
+ * progress cursor and must NEVER be
+ * allowed to skip messages.
  */
 async function archiveNewMessages(
     client,
@@ -447,24 +645,38 @@ async function archiveNewMessages(
     chat,
     meId
 ) {
-    const state = await getChatMessageState(
-        chat.telegramId
-    );
+    const state =
+        await getChatMessageState(
+            chat.telegramId
+        );
 
     let offsetId = 0;
 
-    const mongoNewestId = Number(
-        state.newest?.telegramId || 0
-    );
+    /**
+     * MongoDB is authoritative here.
+     *
+     * We intentionally do NOT use:
+     *
+     * Math.max(
+     *     mongoNewestId,
+     *     cursorId
+     * )
+     *
+     * because a stale or incorrect
+     * cursor must never cause a gap.
+     */
+    const mongoNewestId =
+        Number(
+            state.newest?.telegramId || 0
+        );
 
-    const cursorId = Number(
-        chat.lastArchivedMessageId || 0
-    );
+    const cursorId =
+        Number(
+            chat.lastArchivedMessageId || 0
+        );
 
-    const minId = Math.max(
-        mongoNewestId,
-        cursorId
-    );
+    const minId =
+        mongoNewestId;
 
     let inserted = 0;
     let existing = 0;
@@ -474,84 +686,148 @@ async function archiveNewMessages(
     let animations = 0;
     let large = 0;
 
-    let newestSeenId = minId;
+    let newestSeenId =
+        mongoNewestId;
 
     while (true) {
-        const messages = await getMessagesWithRetry(
-            client,
-            entity,
-            {
-                limit: MESSAGE_BATCH_SIZE,
-                minId,
-                offsetId,
-            }
-        );
+        const messages =
+            await getMessagesWithRetry(
+                client,
+                entity,
+                {
+                    limit:
+                        MESSAGE_BATCH_SIZE,
 
-        if (!messages?.length) {
+                    minId,
+
+                    offsetId,
+                }
+            );
+
+        if (
+            !messages?.length
+        ) {
             break;
         }
 
-        const result = await saveMessages(
-            messages,
-            chat.telegramId,
-            meId
-        );
+        const result =
+            await saveMessages(
+                messages,
+                chat.telegramId,
+                meId
+            );
 
-        inserted += result.inserted;
-        existing += result.existing;
-        media += result.media;
-        webm += result.webm;
-        stickers += result.stickers;
-        animations += result.animations;
-        large += result.large;
+        inserted +=
+            result.inserted;
 
-        for (const message of messages) {
-            const id = Number(message.id);
+        existing +=
+            result.existing;
 
-            if (id > newestSeenId) {
+        media +=
+            result.media;
+
+        webm +=
+            result.webm;
+
+        stickers +=
+            result.stickers;
+
+        animations +=
+            result.animations;
+
+        large +=
+            result.large;
+
+        for (
+            const message
+            of messages
+        ) {
+            const id =
+                Number(message.id);
+
+            if (
+                id > newestSeenId
+            ) {
                 newestSeenId = id;
             }
         }
 
-        const oldestMessage = messages[
-            messages.length - 1
-        ];
+        /**
+         * Telegram returns messages
+         * newest -> oldest.
+         *
+         * Therefore the last message
+         * is the oldest message of
+         * this batch.
+         */
+        const oldestMessage =
+            messages[
+                messages.length - 1
+            ];
 
-        const nextOffsetId = Number(
-            oldestMessage.id
-        );
+        const nextOffsetId =
+            Number(
+                oldestMessage?.id
+            );
 
         if (
-            !Number.isFinite(nextOffsetId) ||
+            !Number.isFinite(
+                nextOffsetId
+            ) ||
             nextOffsetId <= 0
         ) {
             break;
         }
 
-        if (offsetId !== 0 && nextOffsetId >= offsetId) {
+        /**
+         * Safety guard against a
+         * pagination loop.
+         */
+        if (
+            offsetId !== 0 &&
+            nextOffsetId >=
+                offsetId
+        ) {
             break;
         }
 
-        offsetId = nextOffsetId;
+        offsetId =
+            nextOffsetId;
 
-        if (messages.length < MESSAGE_BATCH_SIZE) {
+        /**
+         * Less than the requested
+         * batch size means Telegram
+         * has no more messages in
+         * this range.
+         */
+        if (
+            messages.length <
+            MESSAGE_BATCH_SIZE
+        ) {
             break;
         }
     }
 
     /**
-     * Only advance the cursor.
+     * Update the cursor only after
+     * the incremental archive has
+     * finished successfully.
      *
-     * Historical archiving NEVER changes this cursor.
+     * The cursor can never move
+     * backwards.
      */
-    if (newestSeenId > cursorId) {
+    if (
+        newestSeenId >
+        cursorId
+    ) {
         await Chat.updateOne(
             {
                 _id: chat._id,
             },
             {
-                $set: {
-                    lastArchivedMessageId: newestSeenId,
+                $max: {
+                    lastArchivedMessageId:
+                        newestSeenId,
                 },
             }
         );
@@ -568,19 +844,23 @@ async function archiveNewMessages(
     };
 }
 
+
 /**
  * FULL historical backfill.
  *
- * This is deliberately independent from:
- *   - lastArchivedMessageId
- *   - number of recent messages
- *   - newest MongoDB message
+ * This is deliberately independent
+ * from:
  *
- * The only completion condition is:
+ * - lastArchivedMessageId
+ * - newest MongoDB message
+ * - number of recent messages
+ *
+ * The completion condition is:
  *
  * oldest stored message <= targetDate
  *
- * Otherwise Telegram is scanned backwards.
+ * Otherwise Telegram is scanned
+ * backwards.
  */
 async function archiveOldHistory(
     client,
@@ -589,17 +869,20 @@ async function archiveOldHistory(
     meId,
     targetDate
 ) {
-    const state = await getChatMessageState(
-        chat.telegramId
-    );
+    const state =
+        await getChatMessageState(
+            chat.telegramId
+        );
 
     /**
-     * The chat is complete ONLY if the oldest
-     * stored message reaches the requested date.
+     * The chat is complete ONLY
+     * if the oldest stored message
+     * reaches the requested date.
      */
     if (
         state.oldest?.date &&
-        state.oldest.date <= targetDate
+        state.oldest.date <=
+            targetDate
     ) {
         return {
             inserted: 0,
@@ -626,131 +909,186 @@ async function archiveOldHistory(
 
     let scannedBatches = 0;
 
-    let reachedTarget = false;
+    let reachedTarget =
+        false;
 
-    while (!reachedTarget) {
-        const messages = await getMessagesWithRetry(
-            client,
-            entity,
-            {
-                limit: MESSAGE_BATCH_SIZE,
-                offsetId,
-            }
-        );
+    while (
+        !reachedTarget
+    ) {
+        const messages =
+            await getMessagesWithRetry(
+                client,
+                entity,
+                {
+                    limit:
+                        MESSAGE_BATCH_SIZE,
+
+                    offsetId,
+                }
+            );
 
         scannedBatches++;
 
-        if (!messages?.length) {
+        if (
+            !messages?.length
+        ) {
             break;
         }
 
-        const eligibleMessages = [];
+        const eligibleMessages =
+            [];
 
-        for (const message of messages) {
-            const date = getMessageDate(message);
+        for (
+            const message
+            of messages
+        ) {
+            const date =
+                getMessageDate(
+                    message
+                );
 
             if (!date) {
                 continue;
             }
 
             /**
-             * Keep messages inside the requested
-             * historical range.
+             * Keep messages inside
+             * the requested historical
+             * range.
              */
-            if (date >= targetDate) {
-                eligibleMessages.push(message);
+            if (
+                date >= targetDate
+            ) {
+                eligibleMessages.push(
+                    message
+                );
             }
 
             /**
-             * Telegram returned a message at or
-             * before the target.
-             *
-             * We have now reached the required
-             * historical boundary.
+             * Once Telegram reaches
+             * the requested boundary,
+             * the required history has
+             * been scanned.
              */
-            if (date <= targetDate) {
-                reachedTarget = true;
+            if (
+                date <= targetDate
+            ) {
+                reachedTarget =
+                    true;
             }
         }
 
-        if (eligibleMessages.length > 0) {
-            const result = await saveMessages(
-                eligibleMessages,
-                chat.telegramId,
-                meId
-            );
+        if (
+            eligibleMessages.length >
+            0
+        ) {
+            const result =
+                await saveMessages(
+                    eligibleMessages,
+                    chat.telegramId,
+                    meId
+                );
 
-            inserted += result.inserted;
-            existing += result.existing;
-            media += result.media;
-            webm += result.webm;
-            stickers += result.stickers;
-            animations += result.animations;
-            large += result.large;
+            inserted +=
+                result.inserted;
+
+            existing +=
+                result.existing;
+
+            media +=
+                result.media;
+
+            webm +=
+                result.webm;
+
+            stickers +=
+                result.stickers;
+
+            animations +=
+                result.animations;
+
+            large +=
+                result.large;
         }
 
         /**
-         * Stop immediately once targetDate has
-         * been reached.
+         * Stop immediately once
+         * targetDate has been reached.
          */
         if (reachedTarget) {
             break;
         }
 
         /**
-         * Telegram returns newest -> oldest.
-         * Therefore the last message is the oldest
+         * Telegram returns:
+         *
+         * newest -> oldest
+         *
+         * Therefore the last
+         * message is the oldest
          * message in this batch.
          */
         const oldestMessage =
-            messages[messages.length - 1];
+            messages[
+                messages.length - 1
+            ];
 
-        const nextOffsetId = Number(
-            oldestMessage?.id
-        );
+        const nextOffsetId =
+            Number(
+                oldestMessage?.id
+            );
 
         if (
-            !Number.isFinite(nextOffsetId) ||
+            !Number.isFinite(
+                nextOffsetId
+            ) ||
             nextOffsetId <= 0
         ) {
             break;
         }
 
         /**
-         * Safety guard against pagination loops.
+         * Safety guard against
+         * pagination loops.
          */
         if (
             offsetId !== 0 &&
-            nextOffsetId >= offsetId
+            nextOffsetId >=
+                offsetId
         ) {
             break;
         }
 
-        offsetId = nextOffsetId;
+        offsetId =
+            nextOffsetId;
 
         if (
-            messages.length < MESSAGE_BATCH_SIZE
+            messages.length <
+            MESSAGE_BATCH_SIZE
         ) {
             break;
         }
     }
 
     /**
-     * Verify the actual database state after
-     * historical backfill.
+     * Verify actual database state
+     * after historical backfill.
      *
-     * We do NOT trust number of inserted messages
-     * as the completion criterion.
+     * We do NOT trust the number
+     * of inserted messages as the
+     * completion criterion.
      */
     const finalState =
         await getChatMessageState(
             chat.telegramId
         );
 
-    const completed = Boolean(
-        finalState.oldest?.date &&
-        finalState.oldest.date <= targetDate
-    );
+    const completed =
+        Boolean(
+            finalState.oldest?.date &&
+            finalState.oldest.date <=
+                targetDate
+        );
 
     return {
         inserted,
@@ -764,6 +1102,7 @@ async function archiveOldHistory(
         scannedBatches,
     };
 }
+
 
 /**
  * Archive one chat.
@@ -798,8 +1137,18 @@ async function archiveChat(
     };
 }
 
+
 async function main() {
-    await connectDB();
+    /**
+     * FIX:
+     *
+     * mongodb.js exports:
+     *
+     * {
+     *     connectToDatabase
+     * }
+     */
+    await connectToDatabase();
 
     const client =
         await getTelegramClient();
@@ -807,7 +1156,8 @@ async function main() {
     const me =
         await client.getMe();
 
-    const meId = String(me.id);
+    const meId =
+        String(me.id);
 
     const targetDate =
         getHistoryStartDate();
@@ -819,26 +1169,36 @@ async function main() {
         await client.getDialogs({});
 
     const privateDialogs =
-        dialogs.filter((dialog) => {
-            const entity = dialog.entity;
+        dialogs.filter(
+            (dialog) => {
+                const entity =
+                    dialog.entity;
 
-            return (
-                entity?.className === "User" &&
-                !entity.bot
-            );
-        });
+                return (
+                    entity?.className ===
+                        "User" &&
+                    !entity.bot
+                );
+            }
+        );
 
     /**
      * Build entity map.
      *
-     * This also means archive-messages.js is safe
-     * even when archive-chats.js was not executed.
+     * This also means this file
+     * is safe even if
+     * archive-chats.js was not
+     * executed before it.
      */
     const entityMap =
         new Map();
 
-    for (const dialog of privateDialogs) {
-        const entity = dialog.entity;
+    for (
+        const dialog
+        of privateDialogs
+    ) {
+        const entity =
+            dialog.entity;
 
         entityMap.set(
             String(entity.id),
@@ -847,15 +1207,22 @@ async function main() {
     }
 
     /**
-     * Sync Telegram chats into MongoDB.
+     * Sync Telegram chats into
+     * MongoDB.
      *
      * IMPORTANT:
-     * lastArchivedMessageId is initialized ONLY
-     * when the chat is first created.
+     *
+     * lastArchivedMessageId is
+     * initialized ONLY when the
+     * chat is first created.
      */
-    for (const entity of privateDialogs.map(
-        (dialog) => dialog.entity
-    )) {
+    for (
+        const entity
+        of privateDialogs.map(
+            (dialog) =>
+                dialog.entity
+        )
+    ) {
         const telegramId =
             String(entity.id);
 
@@ -878,16 +1245,25 @@ async function main() {
             {
                 $set: {
                     title,
+
                     username:
-                        entity.username || null,
+                        entity.username ||
+                        null,
+
                     firstName:
-                        entity.firstName || null,
+                        entity.firstName ||
+                        null,
+
                     lastName:
-                        entity.lastName || null,
+                        entity.lastName ||
+                        null,
+
                     type: "private",
                 },
+
                 $setOnInsert: {
-                    lastArchivedMessageId: 0,
+                    lastArchivedMessageId:
+                        0,
                 },
             },
             {
@@ -918,16 +1294,21 @@ async function main() {
     let incompleteHistory = 0;
     let failedChats = 0;
 
-    for (const chat of chats) {
+    for (
+        const chat of chats
+    ) {
         const entity =
             entityMap.get(
-                String(chat.telegramId)
+                String(
+                    chat.telegramId
+                )
             );
 
         /**
-         * A private chat stored in MongoDB but no
-         * longer returned by Telegram cannot be
-         * processed.
+         * A private chat stored in
+         * MongoDB but no longer
+         * returned by Telegram
+         * cannot be processed.
          */
         if (!entity) {
             failedChats++;
@@ -973,7 +1354,8 @@ async function main() {
                 result.historyResult.large;
 
             if (
-                result.historyResult.completed
+                result.historyResult
+                    .completed
             ) {
                 completedHistory++;
             } else {
@@ -991,15 +1373,25 @@ async function main() {
     console.log(
         [
             "Message archive completed",
+
             `inserted=${totalInserted}`,
+
             `existing=${totalExisting}`,
+
             `media=${totalMedia}`,
+
             `webm=${totalWebm}`,
+
             `stickers=${totalStickers}`,
+
             `animations=${totalAnimations}`,
+
             `large=${totalLarge}`,
+
             `historyComplete=${completedHistory}`,
+
             `historyIncomplete=${incompleteHistory}`,
+
             `failedChats=${failedChats}`,
         ].join(" | ")
     );
@@ -1008,6 +1400,13 @@ async function main() {
 
     await mongoose.connection.close();
 
+    /**
+     * Railway / parent process
+     * receives a failed exit code
+     * if any chat failed or its
+     * requested history was not
+     * completed.
+     */
     if (
         failedChats > 0 ||
         incompleteHistory > 0
@@ -1016,14 +1415,17 @@ async function main() {
     }
 }
 
-main().catch(async (error) => {
-    console.error(
-        `Message archive fatal | ${error.message}`
-    );
 
-    try {
-        await mongoose.connection.close();
-    } catch {}
+main().catch(
+    async (error) => {
+        console.error(
+            `Message archive fatal | ${error.message}`
+        );
 
-    process.exitCode = 1;
-});
+        try {
+            await mongoose.connection.close();
+        } catch {}
+
+        process.exitCode = 1;
+    }
+);
