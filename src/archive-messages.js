@@ -22,10 +22,20 @@ const Message =
 */
 
 const INITIAL_ARCHIVE_DAYS =
-    Number(process.env.INITIAL_ARCHIVE_DAYS || 1);
+    Math.max(
+        1,
+        Number(
+            process.env.INITIAL_ARCHIVE_DAYS || 365
+        )
+    );
 
 const BATCH_SIZE =
-    Number(process.env.MESSAGE_BATCH_SIZE || 100);
+    Math.max(
+        1,
+        Number(
+            process.env.MESSAGE_BATCH_SIZE || 100
+        )
+    );
 
 const MAX_RETRIES = 5;
 const RETRY_DELAY = 3000;
@@ -46,11 +56,69 @@ function sleep(ms) {
 
 /*
 |--------------------------------------------------------------------------
+| Normalize Telegram message date
+|--------------------------------------------------------------------------
+|
+| Depending on the GramJS version / object representation,
+| message.date can be a Date object or a Unix timestamp.
+|
+| This helper always returns Unix seconds.
+|
+*/
+
+function getMessageTimestamp(date) {
+    if (!date) {
+        return null;
+    }
+
+    if (date instanceof Date) {
+        return Math.floor(
+            date.getTime() / 1000
+        );
+    }
+
+    if (typeof date === "number") {
+        /*
+         * Seconds:
+         * 1,700,000,000
+         *
+         * Milliseconds:
+         * 1,700,000,000,000
+         */
+        if (date > 100000000000) {
+            return Math.floor(
+                date / 1000
+            );
+        }
+
+        return Math.floor(date);
+    }
+
+    const parsedDate =
+        new Date(date);
+
+    if (
+        !Number.isNaN(
+            parsedDate.getTime()
+        )
+    ) {
+        return Math.floor(
+            parsedDate.getTime() / 1000
+        );
+    }
+
+    return null;
+}
+
+
+/*
+|--------------------------------------------------------------------------
 | Telegram media detection
 |--------------------------------------------------------------------------
 */
 
 function getMediaInfo(message) {
+
     /*
      * Photo
      */
@@ -157,6 +225,7 @@ async function getMessagesWithRetry(
             );
 
         } catch (error) {
+
             if (
                 attempt ===
                 MAX_RETRIES
@@ -212,21 +281,26 @@ async function saveMessages(
 
 
         return {
-            inserted: result.length,
-            duplicates: 0,
+            inserted:
+                result.length,
+
+            duplicates:
+                0,
         };
 
     } catch (error) {
+
         /*
-         * insertMany with ordered:false can insert
-         * valid documents while reporting duplicate
-         * errors for existing messages.
+         * ordered:false allows MongoDB to insert
+         * valid documents even when some documents
+         * are duplicates.
          */
 
         if (
             error.code === 11000 ||
             error.writeErrors
         ) {
+
             let duplicates = 0;
 
 
@@ -244,10 +318,6 @@ async function saveMessages(
             }
 
 
-            /*
-             * Mongoose may expose insertedDocs
-             * when partial insertion occurred.
-             */
             const inserted =
                 Array.isArray(
                     error.insertedDocs
@@ -290,83 +360,122 @@ async function saveMessages(
 
 /*
 |--------------------------------------------------------------------------
-| Archive one chat
+| Build MongoDB message document
 |--------------------------------------------------------------------------
 */
 
-async function archiveChat(
-    client,
-    chat,
-    entity
+function buildMessageDocument(
+    message,
+    chat
 ) {
-    console.log(
-        "\n========================================"
-    );
-
-    console.log(
-        `Archiving: ${chat.title}`
-    );
-
-    console.log(
-        `Chat ID: ${chat.telegramId}`
-    );
-
-    console.log(
-        "========================================"
-    );
-
-
-    const lastArchivedMessageId =
+    const telegramMessageId =
         Number(
-            chat.lastArchivedMessageId || 0
+            message.id
         );
 
 
-    /*
-     * First run:
-     *
-     * Archive only the last N days.
-     */
-    let startTimestamp = null;
+    const timestamp =
+        getMessageTimestamp(
+            message.date
+        );
 
 
     if (
-        lastArchivedMessageId === 0
+        !telegramMessageId ||
+        !timestamp
     ) {
-        const startDate =
-            new Date();
-
-
-        startDate.setDate(
-            startDate.getDate() -
-            INITIAL_ARCHIVE_DAYS
-        );
-
-
-        startTimestamp =
-            Math.floor(
-                startDate.getTime() /
-                1000
-            );
-
-
-        console.log(
-            `Initial archive window: last ${INITIAL_ARCHIVE_DAYS} day(s)`
-        );
-
-    } else {
-        /*
-         * Future runs:
-         *
-         * Only messages newer than the
-         * last archived message.
-         */
-        console.log(
-            `Incremental archive from message ID ${lastArchivedMessageId}`
-        );
+        return null;
     }
 
 
+    const media =
+        getMediaInfo(
+            message
+        );
+
+
+    return {
+        telegramId:
+            telegramMessageId,
+
+        chatId:
+            chat.telegramId,
+
+        senderId:
+            message.senderId
+                ?.toString() ||
+            chat.telegramId,
+
+        text:
+            message.message ||
+            "",
+
+        date:
+            new Date(
+                timestamp * 1000
+            ),
+
+        outgoing:
+            Boolean(
+                message.out
+            ),
+
+        media:
+            media
+                ? {
+                    type:
+                        media.type,
+
+                    storageKey:
+                        null,
+
+                    mimeType:
+                        media.mimeType,
+
+                    size:
+                        media.size,
+
+                    status:
+                        "pending",
+                }
+                : {
+                    type:
+                        null,
+
+                    storageKey:
+                        null,
+
+                    mimeType:
+                        null,
+
+                    size:
+                        null,
+
+                    status:
+                        null,
+                },
+    };
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| Archive NEW messages
+|--------------------------------------------------------------------------
+|
+| This part runs on every execution.
+|
+| It starts from lastArchivedMessageId and continues
+| until there are no newer messages left.
+|
+*/
+
+async function archiveNewMessages(
+    client,
+    chat,
+    entity,
+    lastArchivedMessageId
+) {
     let offsetId = 0;
 
     let totalFetched = 0;
@@ -379,34 +488,22 @@ async function archiveChat(
 
 
     while (true) {
+
         const options = {
             limit:
-            BATCH_SIZE,
+                BATCH_SIZE,
+
+            minId:
+                lastArchivedMessageId,
         };
 
 
         /*
-         * Incremental mode:
-         *
-         * Only retrieve messages newer than
-         * the last archived message.
+         * After the first request, use the oldest
+         * message from the previous batch as offsetId
+         * so we can continue through all newer messages.
          */
         if (
-            lastArchivedMessageId > 0
-        ) {
-            options.minId =
-                lastArchivedMessageId;
-        }
-
-
-        /*
-         * Initial mode:
-         *
-         * Use offsetId to walk backward
-         * through the history.
-         */
-        if (
-            lastArchivedMessageId === 0 &&
             offsetId > 0
         ) {
             options.offsetId =
@@ -439,122 +536,39 @@ async function archiveChat(
 
         for (
             const message of messages
-            ) {
-            if (
-                !message.id ||
-                !message.date
-            ) {
+        ) {
+            const document =
+                buildMessageDocument(
+                    message,
+                    chat
+                );
+
+
+            if (!document) {
                 continue;
             }
 
 
-            const telegramMessageId =
-                Number(
-                    message.id
-                );
-
-
-            /*
-             * Keep track of the highest ID
-             * we've seen.
-             */
             if (
-                telegramMessageId >
+                document.telegramId >
                 highestMessageId
             ) {
                 highestMessageId =
-                    telegramMessageId;
+                    document.telegramId;
             }
 
 
-            /*
-             * Initial archive only:
-             *
-             * Ignore messages older than
-             * the configured date.
-             */
             if (
-                startTimestamp !== null &&
-                message.date <
-                startTimestamp
+                document.media &&
+                document.media.type !== null
             ) {
-                continue;
-            }
-
-
-            const media =
-                getMediaInfo(
-                    message
-                );
-
-
-            if (media) {
                 totalMedia++;
             }
 
 
-            documents.push({
-                telegramId:
-                telegramMessageId,
-
-                chatId:
-                chat.telegramId,
-
-                senderId:
-                    message.senderId
-                        ?.toString() ||
-                    chat.telegramId,
-
-                text:
-                    message.message ||
-                    "",
-
-                date:
-                    new Date(
-                        message.date *
-                        1000
-                    ),
-
-                outgoing:
-                    Boolean(
-                        message.out
-                    ),
-
-                media:
-                    media
-                        ? {
-                            type:
-                            media.type,
-
-                            storageKey:
-                                null,
-
-                            mimeType:
-                            media.mimeType,
-
-                            size:
-                            media.size,
-
-                            status:
-                                "pending",
-                        }
-                        : {
-                            type:
-                                null,
-
-                            storageKey:
-                                null,
-
-                            mimeType:
-                                null,
-
-                            size:
-                                null,
-
-                            status:
-                                null,
-                        },
-            });
+            documents.push(
+                document
+            );
         }
 
 
@@ -571,80 +585,269 @@ async function archiveChat(
             result.duplicates;
 
 
-        const batchMedia =
-            documents.filter(
-                (item) =>
-                    item.media &&
-                    item.media.type !== null
-            ).length;
-
-
-        console.log(
-            `Fetched: ${messages.length} | ` +
-            `Saved: ${result.inserted} | ` +
-            `Duplicates: ${result.duplicates} | ` +
-            `Media: ${batchMedia}`
-        );
-
-
         /*
-         * Update cursor after every successful
-         * batch.
+         * Messages are returned newest -> oldest.
          *
-         * This makes the archive resumable.
+         * The last message is therefore the oldest
+         * message in this batch.
          */
-        if (
-            highestMessageId >
+        const oldestMessage =
+            messages[
+                messages.length - 1
+            ];
+
+
+        offsetId =
             Number(
-                chat.lastArchivedMessageId || 0
-            )
-        ) {
-            await Chat.updateOne(
-                {
-                    _id:
-                    chat._id,
-                },
-                {
-                    $set: {
-                        lastArchivedMessageId:
-                        highestMessageId,
-                    },
-                }
+                oldestMessage.id
             );
 
 
-            chat.lastArchivedMessageId =
-                highestMessageId;
+        /*
+         * If Telegram returned less than the requested
+         * batch size, there are no more messages.
+         */
+        if (
+            messages.length <
+            BATCH_SIZE
+        ) {
+            break;
         }
+    }
+
+
+    /*
+     * Update the cursor only after the complete
+     * incremental pass has succeeded.
+     */
+    if (
+        highestMessageId >
+        lastArchivedMessageId
+    ) {
+        await Chat.updateOne(
+            {
+                _id:
+                    chat._id,
+            },
+            {
+                $set: {
+                    lastArchivedMessageId:
+                        highestMessageId,
+                },
+            }
+        );
+
+        chat.lastArchivedMessageId =
+            highestMessageId;
+    }
+
+
+    return {
+        fetched:
+            totalFetched,
+
+        saved:
+            totalSaved,
+
+        duplicates:
+            totalDuplicates,
+
+        media:
+            totalMedia,
+
+        highestMessageId,
+    };
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| Backfill OLD messages
+|--------------------------------------------------------------------------
+|
+| This part also runs on every execution.
+|
+| It ignores lastArchivedMessageId.
+|
+| It walks backward through Telegram history until
+| INITIAL_ARCHIVE_DAYS is reached.
+|
+*/
+
+async function archiveHistory(
+    client,
+    chat,
+    entity
+) {
+    const startDate =
+        new Date();
+
+    startDate.setDate(
+        startDate.getDate() -
+        INITIAL_ARCHIVE_DAYS
+    );
+
+
+    const startTimestamp =
+        Math.floor(
+            startDate.getTime() / 1000
+        );
+
+
+    let offsetId = 0;
+
+    let totalFetched = 0;
+    let totalSaved = 0;
+    let totalDuplicates = 0;
+    let totalMedia = 0;
+
+
+    while (true) {
+
+        const options = {
+            limit:
+                BATCH_SIZE,
+        };
 
 
         /*
-         * Incremental mode:
-         *
-         * getMessages with minId gives us
-         * newer messages, so there is no need
-         * to paginate backward.
+         * offsetId means:
+         * give me messages older than this ID.
          */
         if (
-            lastArchivedMessageId > 0
+            offsetId > 0
+        ) {
+            options.offsetId =
+                offsetId;
+        }
+
+
+        const messages =
+            await getMessagesWithRetry(
+                client,
+                entity,
+                options
+            );
+
+
+        if (
+            !messages ||
+            messages.length === 0
+        ) {
+            break;
+        }
+
+
+        totalFetched +=
+            messages.length;
+
+
+        const documents = [];
+
+
+        let reachedTargetDate =
+            false;
+
+
+        for (
+            const message of messages
+        ) {
+            const timestamp =
+                getMessageTimestamp(
+                    message.date
+                );
+
+
+            if (!timestamp) {
+                continue;
+            }
+
+
+            /*
+             * Messages older than the requested
+             * archive window are not saved.
+             */
+            if (
+                timestamp <
+                startTimestamp
+            ) {
+                reachedTargetDate =
+                    true;
+
+                continue;
+            }
+
+
+            const document =
+                buildMessageDocument(
+                    message,
+                    chat
+                );
+
+
+            if (!document) {
+                continue;
+            }
+
+
+            if (
+                document.media &&
+                document.media.type !== null
+            ) {
+                totalMedia++;
+            }
+
+
+            documents.push(
+                document
+            );
+        }
+
+
+        const result =
+            await saveMessages(
+                documents
+            );
+
+
+        totalSaved +=
+            result.inserted;
+
+        totalDuplicates +=
+            result.duplicates;
+
+
+        /*
+         * If we have already reached the target
+         * date, there is no reason to request
+         * older messages.
+         */
+        if (
+            reachedTargetDate
         ) {
             break;
         }
 
 
         /*
-         * Initial archive:
-         *
-         * Continue walking backward.
+         * The last message in the batch is the
+         * oldest message returned.
          */
         const oldestMessage =
             messages[
-            messages.length - 1
-                ];
+                messages.length - 1
+            ];
+
+
+        const oldestTimestamp =
+            getMessageTimestamp(
+                oldestMessage.date
+            );
 
 
         if (
-            oldestMessage.date <
+            oldestTimestamp &&
+            oldestTimestamp <=
             startTimestamp
         ) {
             break;
@@ -666,28 +869,81 @@ async function archiveChat(
     }
 
 
-    console.log(
-        "\nChat completed:"
-    );
+    return {
+        fetched:
+            totalFetched,
+
+        saved:
+            totalSaved,
+
+        duplicates:
+            totalDuplicates,
+
+        media:
+            totalMedia,
+    };
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| Archive one chat
+|--------------------------------------------------------------------------
+*/
+
+async function archiveChat(
+    client,
+    chat,
+    entity
+) {
+    const lastArchivedMessageId =
+        Number(
+            chat.lastArchivedMessageId || 0
+        );
+
+
+    /*
+     * ---------------------------------------------------------------
+     * 1. NEW MESSAGES
+     * ---------------------------------------------------------------
+     */
+
+    const newMessages =
+        await archiveNewMessages(
+            client,
+            chat,
+            entity,
+            lastArchivedMessageId
+        );
+
+
+    /*
+     * ---------------------------------------------------------------
+     * 2. HISTORY / BACKFILL
+     * ---------------------------------------------------------------
+     */
+
+    const history =
+        await archiveHistory(
+            client,
+            chat,
+            entity
+        );
+
+
+    /*
+     * ---------------------------------------------------------------
+     * Summary
+     * ---------------------------------------------------------------
+     */
 
     console.log(
-        `Fetched: ${totalFetched}`
-    );
-
-    console.log(
-        `Saved: ${totalSaved}`
-    );
-
-    console.log(
-        `Duplicates: ${totalDuplicates}`
-    );
-
-    console.log(
-        `Media: ${totalMedia}`
-    );
-
-    console.log(
-        `Last archived message ID: ${highestMessageId}`
+        `${chat.title} | ` +
+        `new=${newMessages.saved}/${newMessages.fetched} ` +
+        `history=${history.saved}/${history.fetched} ` +
+        `duplicates=${newMessages.duplicates + history.duplicates} ` +
+        `media=${newMessages.media + history.media} ` +
+        `lastId=${chat.lastArchivedMessageId}`
     );
 }
 
@@ -700,6 +956,7 @@ async function archiveChat(
 
 async function main() {
     try {
+
         await connectToDatabase();
 
 
@@ -729,6 +986,7 @@ async function main() {
         const telegramChats =
             dialogs.filter(
                 (dialog) => {
+
                     const entity =
                         dialog.entity;
 
@@ -759,7 +1017,7 @@ async function main() {
 
 
         console.log(
-            `Found ${telegramChats.length} private chats to archive.`
+            `Found ${telegramChats.length} private chats.`
         );
 
 
@@ -772,7 +1030,7 @@ async function main() {
 
         for (
             const dialog of telegramChats
-            ) {
+        ) {
             const entity =
                 dialog.entity;
 
@@ -807,13 +1065,14 @@ async function main() {
 
 
         console.log(
-            `MongoDB chats to archive: ${chatsToArchive.length}`
+            `MongoDB chats to archive: ${chatsToArchive.length} | ` +
+            `history=${INITIAL_ARCHIVE_DAYS}d`
         );
 
 
         for (
             const chat of chatsToArchive
-            ) {
+        ) {
             const entity =
                 entityMap.get(
                     chat.telegramId
@@ -829,6 +1088,7 @@ async function main() {
                 attempt++
             ) {
                 try {
+
                     await archiveChat(
                         client,
                         chat,
@@ -841,14 +1101,18 @@ async function main() {
                     break;
 
                 } catch (error) {
+
                     if (
-                        attempt === MAX_RETRIES
+                        attempt ===
+                        MAX_RETRIES
                     ) {
                         console.error(
-                            `Archive chat failed ${chat.telegramId}: ${error.message}`
+                            `Archive failed ${chat.telegramId}: ${error.message}`
                         );
                     } else {
-                        await sleep(RETRY_DELAY);
+                        await sleep(
+                            RETRY_DELAY
+                        );
                     }
                 }
             }
@@ -856,22 +1120,14 @@ async function main() {
 
             if (!success) {
                 console.error(
-                    `\nSkipping chat: ${chat.title}`
+                    `Skipping chat: ${chat.title}`
                 );
             }
         }
 
 
         console.log(
-            "\n========================================"
-        );
-
-        console.log(
-            "ARCHIVE COMPLETED"
-        );
-
-        console.log(
-            "========================================\n"
+            "Messages archive completed."
         );
 
 
@@ -885,12 +1141,9 @@ async function main() {
         process.exit(0);
 
     } catch (error) {
-        console.error(
-            "\nArchive messages failed:"
-        );
 
         console.error(
-            error
+            `Archive messages failed: ${error.message}`
         );
 
         process.exit(1);
