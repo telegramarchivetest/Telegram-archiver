@@ -157,27 +157,12 @@ async function getMessagesWithRetry(
             );
 
         } catch (error) {
-            console.error(
-                `Telegram request failed ` +
-                `(attempt ${attempt}/${MAX_RETRIES})`
-            );
-
-            console.error(
-                error.message
-            );
-
-
             if (
                 attempt ===
                 MAX_RETRIES
             ) {
                 throw error;
             }
-
-
-            console.log(
-                `Waiting ${RETRY_DELAY / 1000}s before retry...`
-            );
 
 
             await sleep(
@@ -856,29 +841,14 @@ async function main() {
                     break;
 
                 } catch (error) {
-                    console.error(
-                        `\nFailed to archive "${chat.title}" ` +
-                        `(attempt ${attempt}/${MAX_RETRIES})`
-                    );
-
-
-                    console.error(
-                        error.message
-                    );
-
-
                     if (
-                        attempt <
-                        MAX_RETRIES
+                        attempt === MAX_RETRIES
                     ) {
-                        console.log(
-                            `Retrying in ${RETRY_DELAY / 1000}s...`
+                        console.error(
+                            `Archive chat failed ${chat.telegramId}: ${error.message}`
                         );
-
-
-                        await sleep(
-                            RETRY_DELAY
-                        );
+                    } else {
+                        await sleep(RETRY_DELAY);
                     }
                 }
             }

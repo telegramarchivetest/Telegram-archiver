@@ -1,5 +1,9 @@
 require("dotenv").config();
 
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+
 const {
     getTelegramClient,
 } = require("./telegram");
@@ -8,11 +12,12 @@ const {
     connectToDatabase,
 } = require("./database/mongodb");
 
-const Chat =
-    require("./database/models/Chat");
-
 const Message =
     require("./database/models/Message");
+
+const {
+    uploadFileFromPath,
+} = require("./storage/b2");
 
 
 /*
@@ -21,17 +26,30 @@ const Message =
 |--------------------------------------------------------------------------
 */
 
-const INITIAL_ARCHIVE_DAYS =
-    Number(process.env.INITIAL_ARCHIVE_DAYS || 1);
-
-const BATCH_SIZE =
-    Number(process.env.MESSAGE_BATCH_SIZE || 100);
-
 const MAX_MEDIA_SIZE =
     10 * 1024 * 1024;
 
-const MAX_RETRIES = 5;
-const RETRY_DELAY = 3000;
+const MAX_RETRIES =
+    Number(process.env.MEDIA_MAX_RETRIES || 5);
+
+const RETRY_DELAY =
+    Number(process.env.MEDIA_RETRY_DELAY || 3000);
+
+const MEDIA_CONCURRENCY =
+    Math.max(
+        1,
+        Number(process.env.MEDIA_CONCURRENCY || 3)
+    );
+
+/*
+ * One progress log per N completed media items.
+ * Set to a large value to make logging almost silent.
+ */
+const LOG_PROGRESS_EVERY =
+    Math.max(
+        1,
+        Number(process.env.MEDIA_LOG_EVERY || 1000)
+    );
 
 
 /*
@@ -47,926 +65,654 @@ function sleep(ms) {
 }
 
 
-/*
-|--------------------------------------------------------------------------
-| Telegram media detection
-|--------------------------------------------------------------------------
-*/
+function getFileExtensionFromMimeType(mimeType) {
+    const mime = String(mimeType || "").toLowerCase();
 
-/*
- * Get the actual size of a Telegram photo.
- *
- * Telegram photos can contain multiple PhotoSize objects.
- * We use the largest available size because that is the
- * version that can be downloaded.
- */
-function getTelegramPhotoSize(photo) {
-    if (!photo || !Array.isArray(photo.sizes)) {
-        return null;
-    }
+    if (mime === "image/jpeg") return ".jpg";
+    if (mime === "image/png") return ".png";
+    if (mime === "image/webp") return ".webp";
+    if (mime === "image/gif") return ".gif";
+    if (mime === "video/mp4") return ".mp4";
+    if (mime === "video/webm") return ".webm";
+    if (mime === "audio/ogg") return ".ogg";
+    if (mime === "audio/mpeg") return ".mp3";
+    if (mime === "audio/mp4") return ".m4a";
 
-    let largestSize = 0;
-
-    for (const size of photo.sizes) {
-        /*
-         * Normal PhotoSize
-         */
-        if (
-            typeof size.size === "number" &&
-            size.size > largestSize
-        ) {
-            largestSize = size.size;
-        }
-
-        /*
-         * Progressive PhotoSize
-         *
-         * The sizes array contains the progressive
-         * byte sizes. The last value is the largest.
-         */
-        if (
-            Array.isArray(size.sizes) &&
-            size.sizes.length > 0
-        ) {
-            const progressiveSize =
-                Number(
-                    size.sizes[
-                        size.sizes.length - 1
-                    ]
-                );
-
-            if (
-                Number.isFinite(progressiveSize) &&
-                progressiveSize > largestSize
-            ) {
-                largestSize =
-                    progressiveSize;
-            }
-        }
-    }
-
-    return largestSize > 0
-        ? largestSize
-        : null;
+    return "";
 }
 
 
-/*
- * Get Telegram document attributes.
- */
-function getDocumentAttributes(message) {
-    if (
-        !message.document ||
-        !Array.isArray(message.document.attributes)
-    ) {
-        return [];
-    }
-
-    return message.document.attributes;
-}
-
-
-/*
- * Check whether a Telegram document is a sticker.
- */
-function isTelegramSticker(message) {
+function getDocumentFileName(message) {
     const attributes =
-        getDocumentAttributes(message);
+        message?.document?.attributes;
 
-    return attributes.some(
-        (attribute) =>
-            attribute.className ===
-            "DocumentAttributeSticker"
-    );
-}
-
-
-/*
- * Check whether a Telegram document is an animated GIF.
- *
- * GIFs in Telegram are represented using
- * DocumentAttributeAnimated.
- */
-function isTelegramAnimation(message) {
-    const attributes =
-        getDocumentAttributes(message);
-
-    return attributes.some(
-        (attribute) =>
-            attribute.className ===
-            "DocumentAttributeAnimated"
-    );
-}
-
-
-/*
- * Get media information.
- *
- * Returns:
- *
- * {
- *     media: {...} | null,
- *     reason: null | "sticker" | "animation" | "too_large"
- * }
- */
-function getMediaInfo(message) {
-
-    /*
-     * Photo
-     */
-    if (message.photo) {
-        const size =
-            getTelegramPhotoSize(
-                message.photo
-            );
-
-        /*
-         * If Telegram gives us the photo size
-         * and it is larger than 10 MB, skip it.
-         */
-        if (
-            size !== null &&
-            size > MAX_MEDIA_SIZE
-        ) {
-            return {
-                media: null,
-                reason: "too_large",
-            };
-        }
-
-        return {
-            media: {
-                type: "photo",
-
-                mimeType:
-                    "image/jpeg",
-
-                size,
-            },
-
-            reason: null,
-        };
+    if (!Array.isArray(attributes)) {
+        return "";
     }
 
+    const attribute =
+        attributes.find(
+            (item) =>
+                item?.className ===
+                "DocumentAttributeFilename"
+        );
 
-    /*
-     * Document
-     */
-    if (message.document) {
-
-        /*
-         * Sticker
-         *
-         * Check this BEFORE video/other document
-         * classification because video stickers are
-         * WebM documents with video attributes.
-         */
-        if (
-            isTelegramSticker(message)
-        ) {
-            return {
-                media: null,
-                reason: "sticker",
-            };
-        }
-
-
-        /*
-         * Animated / GIF
-         */
-        if (
-            isTelegramAnimation(message)
-        ) {
-            return {
-                media: null,
-                reason: "animation",
-            };
-        }
-
-
-        const attributes =
-            getDocumentAttributes(
-                message
-            );
-
-
-        const size =
-            Number(
-                message.document.size
-            ) || null;
-
-
-        /*
-         * Any document larger than 10 MB
-         */
-        if (
-            size !== null &&
-            size > MAX_MEDIA_SIZE
-        ) {
-            return {
-                media: null,
-                reason: "too_large",
-            };
-        }
-
-
-        /*
-         * Video
-         */
-        const isVideo =
-            attributes.some(
-                (attribute) =>
-                    attribute.className ===
-                    "DocumentAttributeVideo"
-            );
-
-
-        if (isVideo) {
-            return {
-                media: {
-                    type: "video",
-
-                    mimeType:
-                        message.document.mimeType ||
-                        "video/mp4",
-
-                    size,
-                },
-
-                reason: null,
-            };
-        }
-
-
-        /*
-         * Voice message
-         */
-        const isVoice =
-            attributes.some(
-                (attribute) =>
-                    attribute.className ===
-                    "DocumentAttributeAudio" &&
-                    attribute.voice === true
-            );
-
-
-        if (isVoice) {
-            return {
-                media: {
-                    type: "voice",
-
-                    mimeType:
-                        message.document.mimeType ||
-                        "audio/ogg",
-
-                    size,
-                },
-
-                reason: null,
-            };
-        }
-    }
-
-
-    return {
-        media: null,
-        reason: null,
-    };
+    return attribute?.fileName || "";
 }
 
 
-/*
-|--------------------------------------------------------------------------
-| Telegram request with retry
-|--------------------------------------------------------------------------
-*/
+function isWebmMessage(message, media) {
+    const mimeType =
+        String(
+            media?.mimeType ||
+            message?.document?.mimeType ||
+            ""
+        ).toLowerCase();
+
+    if (mimeType === "video/webm" ||
+        mimeType === "image/webm") {
+        return true;
+    }
+
+    const fileName =
+        getDocumentFileName(message).toLowerCase();
+
+    return fileName.endsWith(".webm");
+}
+
+
+function getMediaMimeType(message, media) {
+    if (media?.mimeType) {
+        return media.mimeType;
+    }
+
+    if (message?.document?.mimeType) {
+        return message.document.mimeType;
+    }
+
+    if (media?.type === "photo") {
+        return "image/jpeg";
+    }
+
+    if (media?.type === "voice") {
+        return "audio/ogg";
+    }
+
+    return "video/mp4";
+}
+
+
+function getMediaExtension(message, media) {
+    const fileName =
+        getDocumentFileName(message);
+
+    const originalExtension =
+        path.extname(fileName || "");
+
+    if (originalExtension) {
+        return originalExtension.toLowerCase();
+    }
+
+    return getFileExtensionFromMimeType(
+        getMediaMimeType(message, media)
+    ) || ".bin";
+}
+
 
 async function getMessagesWithRetry(
     client,
     entity,
-    options
+    messageId
 ) {
+    let lastError;
+
     for (
         let attempt = 1;
         attempt <= MAX_RETRIES;
         attempt++
     ) {
         try {
-            return await client.getMessages(
-                entity,
-                options
-            );
+            const messages =
+                await client.getMessages(
+                    entity,
+                    {
+                        ids: Number(messageId),
+                    }
+                );
 
-        } catch (error) {
-            console.error(
-                `Telegram request failed ` +
-                `(attempt ${attempt}/${MAX_RETRIES})`
-            );
-
-            console.error(
-                error.message
-            );
-
-
-            if (
-                attempt ===
-                MAX_RETRIES
-            ) {
-                throw error;
+            if (!messages || messages.length === 0) {
+                throw new Error(
+                    `Telegram message not found: ${messageId}`
+                );
             }
 
+            return messages[0];
 
-            console.log(
-                `Waiting ${RETRY_DELAY / 1000}s before retry...`
-            );
+        } catch (error) {
+            lastError = error;
 
+            if (attempt === MAX_RETRIES) {
+                break;
+            }
 
-            await sleep(
-                RETRY_DELAY
-            );
-
+            await sleep(RETRY_DELAY);
 
             try {
                 if (!client.connected) {
                     await client.connect();
                 }
             } catch {
-                // Ignore reconnect error.
+                // Telegram client will retry on the next attempt.
             }
         }
     }
+
+    throw lastError;
+}
+
+
+async function downloadMediaWithRetry(
+    message,
+    filePath
+) {
+    let lastError;
+
+    for (
+        let attempt = 1;
+        attempt <= MAX_RETRIES;
+        attempt++
+    ) {
+        try {
+            await message.downloadMedia({
+                outputFile: filePath,
+            });
+
+            if (!fs.existsSync(filePath)) {
+                throw new Error(
+                    "Telegram returned no downloaded file."
+                );
+            }
+
+            return;
+
+        } catch (error) {
+            lastError = error;
+
+            if (attempt === MAX_RETRIES) {
+                break;
+            }
+
+            await sleep(RETRY_DELAY);
+        }
+    }
+
+    throw lastError;
+}
+
+
+async function uploadMediaWithRetry({
+    key,
+    filePath,
+    contentType,
+    size,
+}) {
+    let lastError;
+
+    for (
+        let attempt = 1;
+        attempt <= MAX_RETRIES;
+        attempt++
+    ) {
+        try {
+            const stats =
+                fs.statSync(filePath);
+
+            /*
+             * Final safety check.
+             * Nothing larger than 10 MB reaches B2.
+             */
+            if (stats.size > MAX_MEDIA_SIZE) {
+                throw new Error(
+                    "Media exceeds the 10 MB upload limit."
+                );
+            }
+
+            /*
+             * Final WebM safety check.
+             */
+            if (
+                path.extname(filePath).toLowerCase() ===
+                ".webm"
+            ) {
+                throw new Error(
+                    "WebM media is not allowed."
+                );
+            }
+
+            return await uploadFileFromPath({
+                key,
+                filePath,
+                contentType,
+                size,
+            });
+
+        } catch (error) {
+            lastError = error;
+
+            if (attempt === MAX_RETRIES) {
+                break;
+            }
+
+            await sleep(RETRY_DELAY);
+        }
+    }
+
+    throw lastError;
+}
+
+
+async function updateMediaStatus(
+    messageId,
+    update
+) {
+    await Message.updateOne(
+        {
+            _id: messageId,
+        },
+        {
+            $set: update,
+        }
+    );
+}
+
+
+function buildStorageKey(
+    message,
+    media,
+    extension
+) {
+    return (
+        `media/${message.chatId}/` +
+        `${message.telegramId}${extension}`
+    );
 }
 
 
 /*
 |--------------------------------------------------------------------------
-| Save messages
+| Process one media
 |--------------------------------------------------------------------------
 */
 
-async function saveMessages(
-    documents
+async function processMedia(
+    client,
+    entityCache,
+    dbMessage
 ) {
-    if (
-        documents.length === 0
-    ) {
+    const media =
+        dbMessage.media;
+
+    if (!media) {
         return {
-            inserted: 0,
-            duplicates: 0,
+            status: "ignored",
         };
     }
 
+    if (
+        media.status === "uploaded" ||
+        media.status === "skipped"
+    ) {
+        return {
+            status: "ignored",
+        };
+    }
+
+    let tempDir = null;
 
     try {
-        const result =
-            await Message.insertMany(
-                documents,
+        /*
+         * If MongoDB already knows the media is WebM,
+         * skip it without downloading.
+         */
+        if (
+            String(media.mimeType || "")
+                .toLowerCase() === "video/webm" ||
+            String(media.mimeType || "")
+                .toLowerCase() === "image/webm"
+        ) {
+            await updateMediaStatus(
+                dbMessage._id,
                 {
-                    ordered: false,
+                    "media.status": "skipped",
+                    "media.storageKey": null,
                 }
             );
 
-
-        return {
-            inserted: result.length,
-            duplicates: 0,
-        };
-
-    } catch (error) {
-        /*
-         * insertMany with ordered:false can insert
-         * valid documents while reporting duplicate
-         * errors for existing messages.
-         */
-
-        if (
-            error.code === 11000 ||
-            error.writeErrors
-        ) {
-            let duplicates = 0;
-
-
-            if (
-                Array.isArray(
-                    error.writeErrors
-                )
-            ) {
-                duplicates =
-                    error.writeErrors.filter(
-                        (writeError) =>
-                            writeError.code ===
-                            11000
-                    ).length;
-            }
-
-
-            /*
-             * Mongoose may expose insertedDocs
-             * when partial insertion occurred.
-             */
-            const inserted =
-                Array.isArray(
-                    error.insertedDocs
-                )
-                    ? error.insertedDocs.length
-                    : Math.max(
-                        0,
-                        documents.length -
-                        duplicates
-                    );
-
-
-            const nonDuplicateErrors =
-                Array.isArray(
-                    error.writeErrors
-                )
-                    ? error.writeErrors.filter(
-                        (writeError) =>
-                            writeError.code !==
-                            11000
-                    )
-                    : [];
-
-
-            if (
-                nonDuplicateErrors.length === 0
-            ) {
-                return {
-                    inserted,
-                    duplicates,
-                };
-            }
+            return {
+                status: "skipped",
+            };
         }
 
-
-        throw error;
-    }
-}
-
-
-/*
-|--------------------------------------------------------------------------
-| Archive one chat
-|--------------------------------------------------------------------------
-*/
-
-async function archiveChat(
-    client,
-    chat,
-    entity
-) {
-    console.log(
-        "\n========================================"
-    );
-
-    console.log(
-        `Archiving: ${chat.title}`
-    );
-
-    console.log(
-        `Chat ID: ${chat.telegramId}`
-    );
-
-    console.log(
-        "========================================"
-    );
-
-
-    const lastArchivedMessageId =
-        Number(
-            chat.lastArchivedMessageId || 0
-        );
-
-
-    /*
-     * First run:
-     *
-     * Archive only the last N days.
-     */
-    let startTimestamp = null;
-
-
-    if (
-        lastArchivedMessageId === 0
-    ) {
-        const startDate =
-            new Date();
-
-
-        startDate.setDate(
-            startDate.getDate() -
-            INITIAL_ARCHIVE_DAYS
-        );
-
-
-        startTimestamp =
-            Math.floor(
-                startDate.getTime() /
-                1000
+        /*
+         * If MongoDB already knows the media is too large,
+         * skip it without downloading.
+         */
+        if (
+            Number.isFinite(media.size) &&
+            media.size > MAX_MEDIA_SIZE
+        ) {
+            await updateMediaStatus(
+                dbMessage._id,
+                {
+                    "media.status": "skipped",
+                    "media.storageKey": null,
+                }
             );
 
-
-        console.log(
-            `Initial archive window: last ${INITIAL_ARCHIVE_DAYS} day(s)`
-        );
-
-    } else {
-        /*
-         * Future runs:
-         *
-         * Only messages newer than the
-         * last archived message.
-         */
-        console.log(
-            `Incremental archive from message ID ${lastArchivedMessageId}`
-        );
-    }
-
-
-    let offsetId = 0;
-
-    let totalFetched = 0;
-    let totalSaved = 0;
-    let totalDuplicates = 0;
-    let totalMedia = 0;
-
-    let totalSkippedStickers = 0;
-    let totalSkippedAnimations = 0;
-    let totalSkippedLargeMedia = 0;
-
-    let highestMessageId =
-        lastArchivedMessageId;
-
-
-    while (true) {
-        const options = {
-            limit:
-            BATCH_SIZE,
-        };
-
-
-        /*
-         * Incremental mode:
-         *
-         * Only retrieve messages newer than
-         * the last archived message.
-         */
-        if (
-            lastArchivedMessageId > 0
-        ) {
-            options.minId =
-                lastArchivedMessageId;
+            return {
+                status: "skipped",
+            };
         }
 
+        const chatId =
+            String(dbMessage.chatId);
 
-        /*
-         * Initial mode:
-         *
-         * Use offsetId to walk backward
-         * through the history.
-         */
-        if (
-            lastArchivedMessageId === 0 &&
-            offsetId > 0
-        ) {
-            options.offsetId =
-                offsetId;
+        let entity =
+            entityCache.get(chatId);
+
+        if (!entity) {
+            entity =
+                await client.getEntity(chatId);
+
+            entityCache.set(
+                chatId,
+                entity
+            );
         }
 
-
-        const messages =
+        const telegramMessage =
             await getMessagesWithRetry(
                 client,
                 entity,
-                options
+                dbMessage.telegramId
             );
-
-
-        if (
-            !messages ||
-            messages.length === 0
-        ) {
-            break;
-        }
-
-
-        totalFetched +=
-            messages.length;
-
-
-        const documents = [];
-
-
-        for (
-            const message of messages
-        ) {
-            if (
-                !message.id ||
-                !message.date
-            ) {
-                continue;
-            }
-
-
-            const telegramMessageId =
-                Number(
-                    message.id
-                );
-
-
-            /*
-             * Keep track of the highest ID
-             * we've seen.
-             */
-            if (
-                telegramMessageId >
-                highestMessageId
-            ) {
-                highestMessageId =
-                    telegramMessageId;
-            }
-
-
-            /*
-             * Initial archive only:
-             *
-             * Ignore messages older than
-             * the configured date.
-             */
-            if (
-                startTimestamp !== null &&
-                message.date <
-                startTimestamp
-            ) {
-                continue;
-            }
-
-
-            const mediaResult =
-                getMediaInfo(
-                    message
-                );
-
-
-            /*
-             * Sticker
-             */
-            if (
-                mediaResult.reason ===
-                "sticker"
-            ) {
-                totalSkippedStickers++;
-
-                continue;
-            }
-
-
-            /*
-             * GIF / Animation
-             */
-            if (
-                mediaResult.reason ===
-                "animation"
-            ) {
-                totalSkippedAnimations++;
-
-                continue;
-            }
-
-
-            /*
-             * Media larger than 10 MB
-             */
-            if (
-                mediaResult.reason ===
-                "too_large"
-            ) {
-                totalSkippedLargeMedia++;
-
-                continue;
-            }
-
-
-            const media =
-                mediaResult.media;
-
-
-            if (media) {
-                totalMedia++;
-            }
-
-
-            documents.push({
-                telegramId:
-                    telegramMessageId,
-
-                chatId:
-                    chat.telegramId,
-
-                senderId:
-                    message.senderId
-                        ?.toString() ||
-                    chat.telegramId,
-
-                text:
-                    message.message ||
-                    "",
-
-                date:
-                    new Date(
-                        message.date *
-                        1000
-                    ),
-
-                outgoing:
-                    Boolean(
-                        message.out
-                    ),
-
-                media:
-                    media
-                        ? {
-                            type:
-                                media.type,
-
-                            storageKey:
-                                null,
-
-                            mimeType:
-                                media.mimeType,
-
-                            size:
-                                media.size,
-
-                            status:
-                                "pending",
-                        }
-                        : {
-                            type:
-                                null,
-
-                            storageKey:
-                                null,
-
-                            mimeType:
-                                null,
-
-                            size:
-                                null,
-
-                            status:
-                                null,
-                        },
-            });
-        }
-
-
-        const result =
-            await saveMessages(
-                documents
-            );
-
-
-        totalSaved +=
-            result.inserted;
-
-        totalDuplicates +=
-            result.duplicates;
-
-
-        const batchMedia =
-            documents.filter(
-                (item) =>
-                    item.media &&
-                    item.media.type !== null
-            ).length;
-
-
-        console.log(
-            `Fetched: ${messages.length} | ` +
-            `Saved: ${result.inserted} | ` +
-            `Duplicates: ${result.duplicates} | ` +
-            `Media: ${batchMedia} | ` +
-            `Skipped stickers: ${totalSkippedStickers} | ` +
-            `Skipped animations: ${totalSkippedAnimations} | ` +
-            `Skipped >10MB: ${totalSkippedLargeMedia}`
-        );
-
 
         /*
-         * Update cursor after every successful
-         * batch.
-         *
-         * This makes the archive resumable.
+         * Detect WebM from the real Telegram message.
+         * This protects us even if MongoDB has incorrect
+         * or incomplete MIME information.
          */
         if (
-            highestMessageId >
-            Number(
-                chat.lastArchivedMessageId || 0
+            isWebmMessage(
+                telegramMessage,
+                media
             )
         ) {
-            await Chat.updateOne(
+            await updateMediaStatus(
+                dbMessage._id,
                 {
-                    _id:
-                        chat._id,
-                },
-                {
-                    $set: {
-                        lastArchivedMessageId:
-                            highestMessageId,
-                    },
+                    "media.status": "skipped",
+                    "media.storageKey": null,
                 }
             );
 
-
-            chat.lastArchivedMessageId =
-                highestMessageId;
+            return {
+                status: "skipped",
+            };
         }
 
-
-        /*
-         * Incremental mode:
-         *
-         * getMessages with minId gives us
-         * newer messages, so there is no need
-         * to paginate backward.
-         */
-        if (
-            lastArchivedMessageId > 0
-        ) {
-            break;
-        }
-
-
-        /*
-         * Initial archive:
-         *
-         * Continue walking backward.
-         */
-        const oldestMessage =
-            messages[
-                messages.length - 1
-            ];
-
-
-        if (
-            oldestMessage.date <
-            startTimestamp
-        ) {
-            break;
-        }
-
-
-        offsetId =
-            Number(
-                oldestMessage.id
+        const extension =
+            getMediaExtension(
+                telegramMessage,
+                media
             );
 
-
+        /*
+         * Extra filename-based safety check.
+         */
         if (
-            messages.length <
-            BATCH_SIZE
+            extension.toLowerCase() === ".webm"
         ) {
-            break;
+            await updateMediaStatus(
+                dbMessage._id,
+                {
+                    "media.status": "skipped",
+                    "media.storageKey": null,
+                }
+            );
+
+            return {
+                status: "skipped",
+            };
+        }
+
+        tempDir =
+            await fs.promises.mkdtemp(
+                path.join(
+                    os.tmpdir(),
+                    "telegram-media-"
+                )
+            );
+
+        const filePath =
+            path.join(
+                tempDir,
+                `${dbMessage.telegramId}${extension}`
+            );
+
+        await updateMediaStatus(
+            dbMessage._id,
+            {
+                "media.status": "uploading",
+            }
+        );
+
+        await downloadMediaWithRetry(
+            telegramMessage,
+            filePath
+        );
+
+        const stats =
+            await fs.promises.stat(
+                filePath
+            );
+
+        /*
+         * Final size check after downloading.
+         */
+        if (
+            stats.size > MAX_MEDIA_SIZE
+        ) {
+            await updateMediaStatus(
+                dbMessage._id,
+                {
+                    "media.status": "skipped",
+                    "media.size": stats.size,
+                    "media.storageKey": null,
+                }
+            );
+
+            return {
+                status: "skipped",
+            };
+        }
+
+        /*
+         * Never allow WebM to reach the B2 uploader.
+         */
+        if (
+            path.extname(filePath)
+                .toLowerCase() === ".webm"
+        ) {
+            await updateMediaStatus(
+                dbMessage._id,
+                {
+                    "media.status": "skipped",
+                    "media.size": stats.size,
+                    "media.storageKey": null,
+                }
+            );
+
+            return {
+                status: "skipped",
+            };
+        }
+
+        const contentType =
+            getMediaMimeType(
+                telegramMessage,
+                media
+            );
+
+        const key =
+            buildStorageKey(
+                dbMessage,
+                media,
+                extension
+            );
+
+        await uploadMediaWithRetry({
+            key,
+            filePath,
+            contentType,
+            size: stats.size,
+        });
+
+        await updateMediaStatus(
+            dbMessage._id,
+            {
+                "media.storageKey": key,
+                "media.size": stats.size,
+                "media.status": "uploaded",
+                "media.mimeType": contentType,
+            }
+        );
+
+        return {
+            status: "uploaded",
+        };
+
+    } catch (error) {
+        try {
+            await updateMediaStatus(
+                dbMessage._id,
+                {
+                    "media.status": "failed",
+                }
+            );
+        } catch {
+            // Do not create extra logs for a secondary DB error.
+        }
+
+        return {
+            status: "failed",
+            error: error?.message || "Unknown error",
+        };
+
+    } finally {
+        if (tempDir) {
+            try {
+                await fs.promises.rm(
+                    tempDir,
+                    {
+                        recursive: true,
+                        force: true,
+                    }
+                );
+            } catch {
+                // Ignore cleanup errors.
+            }
+        }
+    }
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| Concurrent processing
+|--------------------------------------------------------------------------
+*/
+
+async function processMediaConcurrently(
+    client,
+    messages
+) {
+    const entityCache =
+        new Map();
+
+    let nextIndex = 0;
+    let completed = 0;
+    let uploaded = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    const failureSamples = [];
+
+    async function worker() {
+        while (true) {
+            const index =
+                nextIndex++;
+
+            if (index >= messages.length) {
+                return;
+            }
+
+            const result =
+                await processMedia(
+                    client,
+                    entityCache,
+                    messages[index]
+                );
+
+            completed++;
+
+            if (result.status === "uploaded") {
+                uploaded++;
+            } else if (result.status === "skipped") {
+                skipped++;
+            } else if (result.status === "failed") {
+                failed++;
+
+                if (
+                    failureSamples.length < 5
+                ) {
+                    failureSamples.push(
+                        `${messages[index].chatId}/${messages[index].telegramId}: ${result.error}`
+                    );
+                }
+            }
+
+            if (
+                completed % LOG_PROGRESS_EVERY === 0
+            ) {
+                console.log(
+                    `Media progress ${completed}/${messages.length} | ` +
+                    `uploaded=${uploaded} skipped=${skipped} failed=${failed}`
+                );
+            }
         }
     }
 
+    const workers =
+        Array.from(
+            {
+                length: Math.min(
+                    MEDIA_CONCURRENCY,
+                    messages.length
+                ),
+            },
+            () => worker()
+        );
 
-    console.log(
-        "\nChat completed:"
-    );
+    await Promise.all(workers);
 
-    console.log(
-        `Fetched: ${totalFetched}`
-    );
-
-    console.log(
-        `Saved: ${totalSaved}`
-    );
-
-    console.log(
-        `Duplicates: ${totalDuplicates}`
-    );
-
-    console.log(
-        `Media: ${totalMedia}`
-    );
-
-    console.log(
-        `Skipped stickers: ${totalSkippedStickers}`
-    );
-
-    console.log(
-        `Skipped animations: ${totalSkippedAnimations}`
-    );
-
-    console.log(
-        `Skipped >10MB media: ${totalSkippedLargeMedia}`
-    );
-
-    console.log(
-        `Last archived message ID: ${highestMessageId}`
-    );
+    return {
+        total: messages.length,
+        uploaded,
+        skipped,
+        failed,
+        failureSamples,
+    };
 }
 
 
@@ -980,200 +726,67 @@ async function main() {
     try {
         await connectToDatabase();
 
-
         const client =
             await getTelegramClient();
 
+        const messages =
+            await Message.find({
+                "media.type": {
+                    $in: [
+                        "photo",
+                        "video",
+                        "voice",
+                    ],
+                },
+                "media.status": {
+                    $in: [
+                        "pending",
+                        "failed",
+                    ],
+                },
+            })
+                .sort({
+                    date: 1,
+                })
+                .lean();
 
-        /*
-         * Load dialogs only once.
-         */
-        const dialogs =
-            await client.getDialogs({});
-
-
-        /*
-         * ONLY real users.
-         *
-         * Groups:
-         *   excluded
-         *
-         * Channels:
-         *   excluded
-         *
-         * Bots:
-         *   excluded
-         */
-        const telegramChats =
-            dialogs.filter(
-                (dialog) => {
-                    const entity =
-                        dialog.entity;
-
-
-                    if (!entity) {
-                        return false;
-                    }
-
-
-                    if (
-                        entity.className !==
-                        "User"
-                    ) {
-                        return false;
-                    }
-
-
-                    if (
-                        entity.bot === true
-                    ) {
-                        return false;
-                    }
-
-
-                    return true;
-                }
+        if (messages.length === 0) {
+            console.log(
+                "Media archive: nothing to upload."
             );
 
-
-        console.log(
-            `Found ${telegramChats.length} private chats to archive.`
-        );
-
-
-        /*
-         * Telegram ID -> entity
-         */
-        const entityMap =
-            new Map();
-
-
-        for (
-            const dialog of telegramChats
-        ) {
-            const entity =
-                dialog.entity;
-
-
-            entityMap.set(
-                entity.id.toString(),
-                entity
-            );
+            return;
         }
 
+        console.log(
+            `Media archive started: ${messages.length} items | concurrency=${MEDIA_CONCURRENCY}`
+        );
 
-        /*
-         * Get private chats from MongoDB.
-         */
-        const chats =
-            await Chat.find({
-                type: "private",
-            }).lean();
-
-
-        /*
-         * Keep only chats that still exist
-         * as real Telegram users.
-         */
-        const chatsToArchive =
-            chats.filter(
-                (chat) =>
-                    entityMap.has(
-                        chat.telegramId
-                    )
+        const result =
+            await processMediaConcurrently(
+                client,
+                messages
             );
 
-
         console.log(
-            `MongoDB chats to archive: ${chatsToArchive.length}`
+            `Media archive completed | total=${result.total} uploaded=${result.uploaded} skipped=${result.skipped} failed=${result.failed}`
         );
 
-
-        for (
-            const chat of chatsToArchive
+        /*
+         * Print only a maximum of 5 failure samples,
+         * instead of one log per failed file.
+         */
+        if (
+            result.failureSamples.length > 0
         ) {
-            const entity =
-                entityMap.get(
-                    chat.telegramId
-                );
-
-
-            let success = false;
-
-
-            for (
-                let attempt = 1;
-                attempt <= MAX_RETRIES;
-                attempt++
-            ) {
-                try {
-                    await archiveChat(
-                        client,
-                        chat,
-                        entity
-                    );
-
-
-                    success = true;
-
-                    break;
-
-                } catch (error) {
-                    console.error(
-                        `\nFailed to archive "${chat.title}" ` +
-                        `(attempt ${attempt}/${MAX_RETRIES})`
-                    );
-
-
-                    console.error(
-                        error.message
-                    );
-
-
-                    if (
-                        attempt <
-                        MAX_RETRIES
-                    ) {
-                        console.log(
-                            `Retrying in ${RETRY_DELAY / 1000}s...`
-                        );
-
-
-                        await sleep(
-                            RETRY_DELAY
-                        );
-                    }
-                }
-            }
-
-
-            if (!success) {
-                console.error(
-                    `\nSkipping chat: ${chat.title}`
-                );
-            }
+            console.error(
+                `Media failure samples: ${result.failureSamples.join(" | ")}`
+            );
         }
-
-
-        console.log(
-            "\n========================================"
-        );
-
-        console.log(
-            "ARCHIVE COMPLETED"
-        );
-
-        console.log(
-            "========================================"
-        );
 
     } catch (error) {
         console.error(
-            "\nFatal error:"
-        );
-
-        console.error(
-            error
+            `Media archive fatal error: ${error?.message || error}`
         );
 
         process.exitCode = 1;

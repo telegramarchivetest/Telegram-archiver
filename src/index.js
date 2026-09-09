@@ -22,10 +22,7 @@ const steps = [
 
 function runStep(step) {
     return new Promise((resolve, reject) => {
-        console.log("\n");
-        console.log("========================================");
-        console.log(step.name);
-        console.log("========================================\n");
+        console.log(`Starting: ${step.name}`);
 
 
         const filePath =
@@ -58,10 +55,6 @@ function runStep(step) {
             "close",
             (code) => {
                 if (code === 0) {
-                    console.log(
-                        `\n${step.name} completed successfully.`
-                    );
-
                     resolve();
                     return;
                 }
@@ -79,12 +72,7 @@ function runStep(step) {
 
 
 async function main() {
-    console.log("\n");
-    console.log("========================================");
-    console.log("TELEGRAM ARCHIVER");
-    console.log("========================================");
-    console.log("Starting archive pipeline...");
-    console.log("\n");
+    console.log("Telegram archive pipeline started.");
 
 
     try {
@@ -93,25 +81,13 @@ async function main() {
         }
 
 
-        console.log("\n");
-        console.log("========================================");
-        console.log("ARCHIVE PIPELINE COMPLETED");
-        console.log("========================================");
-        console.log(
-            "Chats, messages and media have been processed."
-        );
-        console.log("\n");
+        console.log("Telegram archive pipeline completed.");
 
 
         process.exit(0);
 
     } catch (error) {
-        console.error("\n");
-        console.error("========================================");
-        console.error("ARCHIVE PIPELINE FAILED");
-        console.error("========================================");
-        console.error(error.message);
-        console.error("\n");
+        console.error(`Archive pipeline failed: ${error.message}`);
 
 
         process.exit(1);

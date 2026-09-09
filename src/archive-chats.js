@@ -59,17 +59,7 @@ async function main() {
 
             return true;
         });
-
-    console.log(
-        `Found ${privateChats.length} private chats.`
-    );
-
-    console.log(
-        `(Users + Saved Messages, bots excluded)\n`
-    );
-
-
-    for (const dialog of privateChats) {
+for (const dialog of privateChats) {
         const user =
             dialog.entity;
 
@@ -132,12 +122,7 @@ async function main() {
                 setDefaultsOnInsert: true,
             }
         );
-
-
-        console.log(
-            `Saved: ${title} | ${chatData.telegramId}`
-        );
-    }
+}
 
 
     console.log(
