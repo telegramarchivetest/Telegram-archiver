@@ -1,147 +1,169 @@
 require("dotenv").config();
 
-const { getTelegramClient } = require("./telegram");
+const {
+    getTelegramClient,
+} = require("./telegram");
 
 const {
     connectToDatabase,
 } = require("./database/mongodb");
 
-const Chat = require("./database/models/Chat");
+const Chat =
+    require("./database/models/Chat");
 
 
 async function main() {
-    await connectToDatabase();
+    try {
+        await connectToDatabase();
 
-    const client =
-        await getTelegramClient();
+        const client =
+            await getTelegramClient();
 
-    const me =
-        await client.getMe();
+        const me =
+            await client.getMe();
 
-    const myId =
-        me.id.toString();
+        const myId =
+            me.id.toString();
 
-    console.log(
-        `My Telegram ID: ${myId}\n`
-    );
+        const dialogs =
+            await client.getDialogs({});
 
-    const dialogs =
-        await client.getDialogs({});
+        const privateChats =
+            dialogs.filter((dialog) => {
+                const entity =
+                    dialog.entity;
 
-    const privateChats =
-        dialogs.filter((dialog) => {
-            const entity =
+                if (!entity) {
+                    return false;
+                }
+
+                /*
+                 * Only private users.
+                 */
+                if (
+                    entity.className !==
+                    "User"
+                ) {
+                    return false;
+                }
+
+                /*
+                 * Ignore bots.
+                 */
+                if (
+                    entity.bot === true
+                ) {
+                    return false;
+                }
+
+                return true;
+            });
+
+        let created = 0;
+        let existing = 0;
+
+        /*
+         * Sync Telegram private chats
+         * with MongoDB.
+         *
+         * telegramId is the unique key.
+         */
+        for (const dialog of privateChats) {
+            const user =
                 dialog.entity;
 
-            if (!entity) {
-                return false;
-            }
+            const telegramId =
+                user.id.toString();
+
+            const isSavedMessages =
+                telegramId === myId;
+
+            const name =
+                `${user.firstName || ""} ${user.lastName || ""}`
+                    .trim();
+
+            const title =
+                isSavedMessages
+                    ? "Saved Messages"
+                    : (
+                        name ||
+                        user.username ||
+                        "Unknown"
+                    );
+
+            const chatData = {
+                telegramId,
+
+                type: "private",
+
+                title,
+
+                username:
+                    user.username ||
+                    null,
+
+                firstName:
+                    user.firstName ||
+                    null,
+
+                lastName:
+                    user.lastName ||
+                    null,
+            };
 
             /*
-             * Only private users.
+             * Check whether chat already exists.
              */
-            if (
-                entity.className !==
-                "User"
-            ) {
-                return false;
-            }
+            const existingChat =
+                await Chat.exists({
+                    telegramId,
+                });
 
             /*
-             * Remove bots.
+             * IMPORTANT:
              *
-             * Saved Messages is not a bot,
-             * so it remains.
+             * Only update chat information.
+             * Do NOT overwrite
+             * lastArchivedMessageId.
              */
-            if (entity.bot === true) {
-                return false;
+            await Chat.updateOne(
+                {
+                    telegramId,
+                },
+                {
+                    $set: chatData,
+
+                    $setOnInsert: {
+                        lastArchivedMessageId: 0,
+                    },
+                },
+                {
+                    upsert: true,
+                }
+            );
+
+            if (existingChat) {
+                existing++;
+            } else {
+                created++;
             }
-
-            return true;
-        });
-for (const dialog of privateChats) {
-        const user =
-            dialog.entity;
-
-        const isSavedMessages =
-            user.id?.toString() === myId;
-
-
-        const name =
-            `${user.firstName || ""} ${user.lastName || ""}`
-                .trim();
-
-
-        let title;
-
-
-        if (isSavedMessages) {
-            title =
-                "Saved Messages";
-        } else {
-            title =
-                name ||
-                user.username ||
-                "Unknown";
         }
 
-
-        const chatData = {
-            telegramId:
-                user.id.toString(),
-
-            type: "private",
-
-            title,
-
-            username:
-                user.username ||
-                null,
-
-            firstName:
-                user.firstName ||
-                null,
-
-            lastName:
-                user.lastName ||
-                null,
-        };
-
-
-        await Chat.findOneAndUpdate(
-            {
-                telegramId:
-                chatData.telegramId,
-            },
-
-            chatData,
-
-            {
-                upsert: true,
-                new: true,
-                setDefaultsOnInsert: true,
-            }
+        console.log(
+            `Chats synced | telegram=${privateChats.length} created=${created} existing=${existing}`
         );
+
+        await client.disconnect();
+
+        process.exit(0);
+    } catch (error) {
+        console.error(
+            `Archive chats failed: ${error.message}`
+        );
+
+        process.exit(1);
+    }
 }
 
 
-    console.log(
-        "\nAll private chats saved."
-    );
-
-
-    await client.disconnect();
-
-    process.exit(0);
-}
-
-
-main().catch((error) => {
-    console.error(
-        "\nArchive chats failed:"
-    );
-
-    console.error(error);
-
-    process.exit(1);
-});
+main();
