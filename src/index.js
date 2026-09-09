@@ -10,15 +10,10 @@ const steps = [
         file: "archive-chats.js",
     },
     {
-        name: "Archive Messages",
-        file: "archive-messages.js",
-    },
-    {
         name: "Archive Media",
         file: "archive-media.js",
     },
 ];
-
 
 function runStep(step) {
     return new Promise((resolve, reject) => {
