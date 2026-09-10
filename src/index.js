@@ -1,7 +1,10 @@
 require("dotenv").config();
 
-const { spawn } = require("child_process");
-const path = require("path");
+const { spawn } =
+    require("child_process");
+
+const path =
+    require("path");
 
 
 const steps = [
@@ -10,79 +13,96 @@ const steps = [
         file: "archive-chats.js",
     },
     {
+        name: "Archive Messages",
+        file: "archive-messages.js",
+    },
+    {
         name: "Archive Media",
         file: "archive-media.js",
     },
 ];
 
+
 function runStep(step) {
-    return new Promise((resolve, reject) => {
-        console.log(`Starting: ${step.name}`);
-
-
-        const filePath =
-            path.join(
-                __dirname,
-                step.file
+    return new Promise(
+        (resolve, reject) => {
+            console.log(
+                `Starting: ${step.name}`
             );
 
 
-        const child =
-            spawn(
-                process.execPath,
-                [filePath],
-                {
-                    stdio: "inherit",
-                    env: process.env,
-                }
-            );
-
-
-        child.on(
-            "error",
-            (error) => {
-                reject(error);
-            }
-        );
-
-
-        child.on(
-            "close",
-            (code) => {
-                if (code === 0) {
-                    resolve();
-                    return;
-                }
-
-
-                reject(
-                    new Error(
-                        `${step.name} failed with exit code ${code}`
-                    )
+            const filePath =
+                path.join(
+                    __dirname,
+                    step.file
                 );
-            }
-        );
-    });
+
+
+            const child =
+                spawn(
+                    process.execPath,
+                    [filePath],
+                    {
+                        stdio: "inherit",
+                        env: process.env,
+                    }
+                );
+
+
+            child.on(
+                "error",
+                (error) => {
+                    reject(error);
+                }
+            );
+
+
+            child.on(
+                "close",
+                (code) => {
+                    if (code === 0) {
+                        resolve();
+                        return;
+                    }
+
+
+                    reject(
+                        new Error(
+                            `${step.name} failed with exit code ${code}`
+                        )
+                    );
+                }
+            );
+        }
+    );
 }
 
 
 async function main() {
-    console.log("Telegram archive pipeline started.");
+    console.log(
+        "Telegram archive pipeline started."
+    );
 
 
     try {
-        for (const step of steps) {
+        for (
+            const step of steps
+        ) {
             await runStep(step);
         }
 
 
-        console.log("Telegram archive pipeline completed.");
+        console.log(
+            "Telegram archive pipeline completed."
+        );
 
 
         process.exit(0);
 
     } catch (error) {
-        console.error(`Archive pipeline failed: ${error.message}`);
+        console.error(
+            `Archive pipeline failed: ${error.message}`
+        );
 
 
         process.exit(1);
