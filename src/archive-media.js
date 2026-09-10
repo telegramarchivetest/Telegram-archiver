@@ -1,3 +1,4 @@
+```js
 require("dotenv").config();
 
 const fs = require("fs");
@@ -30,25 +31,32 @@ const MAX_MEDIA_SIZE =
     10 * 1024 * 1024;
 
 const MAX_RETRIES =
-    Number(process.env.MEDIA_MAX_RETRIES || 5);
+    Number(
+        process.env.MEDIA_MAX_RETRIES || 5
+    );
 
 const RETRY_DELAY =
-    Number(process.env.MEDIA_RETRY_DELAY || 3000);
+    Number(
+        process.env.MEDIA_RETRY_DELAY || 3000
+    );
 
 const MEDIA_CONCURRENCY =
     Math.max(
         1,
-        Number(process.env.MEDIA_CONCURRENCY || 3)
+        Number(
+            process.env.MEDIA_CONCURRENCY || 3
+        )
     );
 
 /*
  * One progress log per N completed media items.
- * Set to a large value to make logging almost silent.
  */
 const LOG_PROGRESS_EVERY =
     Math.max(
         1,
-        Number(process.env.MEDIA_LOG_EVERY || 1000)
+        Number(
+            process.env.MEDIA_LOG_EVERY || 1000
+        )
     );
 
 
@@ -65,8 +73,13 @@ function sleep(ms) {
 }
 
 
-function getFileExtensionFromMimeType(mimeType) {
-    const mime = String(mimeType || "").toLowerCase();
+function getFileExtensionFromMimeType(
+    mimeType
+) {
+    const mime =
+        String(
+            mimeType || ""
+        ).toLowerCase();
 
     if (mime === "image/jpeg") return ".jpg";
     if (mime === "image/png") return ".png";
@@ -101,7 +114,10 @@ function getDocumentFileName(message) {
 }
 
 
-function isWebmMessage(message, media) {
+function isWebmMessage(
+    message,
+    media
+) {
     const mimeType =
         String(
             media?.mimeType ||
@@ -109,19 +125,26 @@ function isWebmMessage(message, media) {
             ""
         ).toLowerCase();
 
-    if (mimeType === "video/webm" ||
-        mimeType === "image/webm") {
+    if (
+        mimeType === "video/webm" ||
+        mimeType === "image/webm"
+    ) {
         return true;
     }
 
     const fileName =
-        getDocumentFileName(message).toLowerCase();
+        getDocumentFileName(
+            message
+        ).toLowerCase();
 
     return fileName.endsWith(".webm");
 }
 
 
-function getMediaMimeType(message, media) {
+function getMediaMimeType(
+    message,
+    media
+) {
     if (media?.mimeType) {
         return media.mimeType;
     }
@@ -142,22 +165,40 @@ function getMediaMimeType(message, media) {
 }
 
 
-function getMediaExtension(message, media) {
+function getMediaExtension(
+    message,
+    media
+) {
     const fileName =
-        getDocumentFileName(message);
+        getDocumentFileName(
+            message
+        );
 
     const originalExtension =
-        path.extname(fileName || "");
+        path.extname(
+            fileName || ""
+        );
 
     if (originalExtension) {
         return originalExtension.toLowerCase();
     }
 
-    return getFileExtensionFromMimeType(
-        getMediaMimeType(message, media)
-    ) || ".bin";
+    return (
+        getFileExtensionFromMimeType(
+            getMediaMimeType(
+                message,
+                media
+            )
+        ) || ".bin"
+    );
 }
 
+
+/*
+|--------------------------------------------------------------------------
+| Telegram
+|--------------------------------------------------------------------------
+*/
 
 async function getMessagesWithRetry(
     client,
@@ -176,11 +217,16 @@ async function getMessagesWithRetry(
                 await client.getMessages(
                     entity,
                     {
-                        ids: Number(messageId),
+                        ids: Number(
+                            messageId
+                        ),
                     }
                 );
 
-            if (!messages || messages.length === 0) {
+            if (
+                !messages ||
+                messages.length === 0
+            ) {
                 throw new Error(
                     `Telegram message not found: ${messageId}`
                 );
@@ -191,18 +237,23 @@ async function getMessagesWithRetry(
         } catch (error) {
             lastError = error;
 
-            if (attempt === MAX_RETRIES) {
+            if (
+                attempt ===
+                MAX_RETRIES
+            ) {
                 break;
             }
 
-            await sleep(RETRY_DELAY);
+            await sleep(
+                RETRY_DELAY
+            );
 
             try {
                 if (!client.connected) {
                     await client.connect();
                 }
             } catch {
-                // Telegram client will retry on the next attempt.
+                // Retry on next attempt.
             }
         }
     }
@@ -227,7 +278,11 @@ async function downloadMediaWithRetry(
                 outputFile: filePath,
             });
 
-            if (!fs.existsSync(filePath)) {
+            if (
+                !fs.existsSync(
+                    filePath
+                )
+            ) {
                 throw new Error(
                     "Telegram returned no downloaded file."
                 );
@@ -238,11 +293,16 @@ async function downloadMediaWithRetry(
         } catch (error) {
             lastError = error;
 
-            if (attempt === MAX_RETRIES) {
+            if (
+                attempt ===
+                MAX_RETRIES
+            ) {
                 break;
             }
 
-            await sleep(RETRY_DELAY);
+            await sleep(
+                RETRY_DELAY
+            );
         }
     }
 
@@ -265,13 +325,17 @@ async function uploadMediaWithRetry({
     ) {
         try {
             const stats =
-                fs.statSync(filePath);
+                fs.statSync(
+                    filePath
+                );
 
             /*
-             * Final safety check.
-             * Nothing larger than 10 MB reaches B2.
+             * Final size safety check.
              */
-            if (stats.size > MAX_MEDIA_SIZE) {
+            if (
+                stats.size >
+                MAX_MEDIA_SIZE
+            ) {
                 throw new Error(
                     "Media exceeds the 10 MB upload limit."
                 );
@@ -281,7 +345,9 @@ async function uploadMediaWithRetry({
              * Final WebM safety check.
              */
             if (
-                path.extname(filePath).toLowerCase() ===
+                path.extname(
+                    filePath
+                ).toLowerCase() ===
                 ".webm"
             ) {
                 throw new Error(
@@ -299,11 +365,16 @@ async function uploadMediaWithRetry({
         } catch (error) {
             lastError = error;
 
-            if (attempt === MAX_RETRIES) {
+            if (
+                attempt ===
+                MAX_RETRIES
+            ) {
                 break;
             }
 
-            await sleep(RETRY_DELAY);
+            await sleep(
+                RETRY_DELAY
+            );
         }
     }
 
@@ -328,13 +399,82 @@ async function updateMediaStatus(
 
 function buildStorageKey(
     message,
-    media,
     extension
 ) {
     return (
         `media/${message.chatId}/` +
         `${message.telegramId}${extension}`
     );
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| Entity cache
+|--------------------------------------------------------------------------
+*/
+
+/*
+ * Load all private non-bot users from Telegram dialogs.
+ *
+ * This is important because Telegram needs the user's
+ * access_hash to build the InputPeer required for
+ * getMessages() and media downloads.
+ *
+ * getDialogs() also populates Telethon's session cache.
+ */
+async function loadPrivateEntities(
+    client
+) {
+    const dialogs =
+        await client.getDialogs({});
+
+    const entityCache =
+        new Map();
+
+    for (
+        const dialog of dialogs
+    ) {
+        const entity =
+            dialog?.entity;
+
+        if (!entity) {
+            continue;
+        }
+
+        /*
+         * Only private users.
+         *
+         * Groups, supergroups and channels
+         * are intentionally excluded.
+         */
+        if (
+            entity.className !==
+            "User"
+        ) {
+            continue;
+        }
+
+        /*
+         * Bots are intentionally excluded.
+         */
+        if (
+            entity.bot === true
+        ) {
+            continue;
+        }
+
+        entityCache.set(
+            String(entity.id),
+            entity
+        );
+    }
+
+    console.log(
+        `Telegram entities loaded: ${entityCache.size} private users`
+    );
+
+    return entityCache;
 }
 
 
@@ -371,20 +511,26 @@ async function processMedia(
 
     try {
         /*
-         * If MongoDB already knows the media is WebM,
-         * skip it without downloading.
+         * MongoDB WebM safety check.
          */
         if (
-            String(media.mimeType || "")
-                .toLowerCase() === "video/webm" ||
-            String(media.mimeType || "")
-                .toLowerCase() === "image/webm"
+            String(
+                media.mimeType || ""
+            ).toLowerCase() ===
+                "video/webm" ||
+            String(
+                media.mimeType || ""
+            ).toLowerCase() ===
+                "image/webm"
         ) {
             await updateMediaStatus(
                 dbMessage._id,
                 {
-                    "media.status": "skipped",
-                    "media.storageKey": null,
+                    "media.status":
+                        "skipped",
+
+                    "media.storageKey":
+                        null,
                 }
             );
 
@@ -394,18 +540,23 @@ async function processMedia(
         }
 
         /*
-         * If MongoDB already knows the media is too large,
-         * skip it without downloading.
+         * MongoDB size safety check.
          */
         if (
-            Number.isFinite(media.size) &&
-            media.size > MAX_MEDIA_SIZE
+            Number.isFinite(
+                media.size
+            ) &&
+            media.size >
+                MAX_MEDIA_SIZE
         ) {
             await updateMediaStatus(
                 dbMessage._id,
                 {
-                    "media.status": "skipped",
-                    "media.storageKey": null,
+                    "media.status":
+                        "skipped",
+
+                    "media.storageKey":
+                        null,
                 }
             );
 
@@ -415,18 +566,27 @@ async function processMedia(
         }
 
         const chatId =
-            String(dbMessage.chatId);
+            String(
+                dbMessage.chatId
+            );
 
-        let entity =
-            entityCache.get(chatId);
+        /*
+         * IMPORTANT:
+         * Use the entity obtained from getDialogs().
+         *
+         * Do NOT call client.getEntity(chatId)
+         * here because the database only has the
+         * Telegram ID and that may not be enough
+         * when the entity is not cached.
+         */
+        const entity =
+            entityCache.get(
+                chatId
+            );
 
         if (!entity) {
-            entity =
-                await client.getEntity(chatId);
-
-            entityCache.set(
-                chatId,
-                entity
+            throw new Error(
+                `Telegram entity not found in dialogs: ${chatId}`
             );
         }
 
@@ -438,9 +598,8 @@ async function processMedia(
             );
 
         /*
-         * Detect WebM from the real Telegram message.
-         * This protects us even if MongoDB has incorrect
-         * or incomplete MIME information.
+         * Detect WebM from the actual
+         * Telegram message.
          */
         if (
             isWebmMessage(
@@ -451,8 +610,11 @@ async function processMedia(
             await updateMediaStatus(
                 dbMessage._id,
                 {
-                    "media.status": "skipped",
-                    "media.storageKey": null,
+                    "media.status":
+                        "skipped",
+
+                    "media.storageKey":
+                        null,
                 }
             );
 
@@ -468,16 +630,21 @@ async function processMedia(
             );
 
         /*
-         * Extra filename-based safety check.
+         * Filename-based WebM safety.
          */
         if (
-            extension.toLowerCase() === ".webm"
+            extension
+                .toLowerCase() ===
+            ".webm"
         ) {
             await updateMediaStatus(
                 dbMessage._id,
                 {
-                    "media.status": "skipped",
-                    "media.storageKey": null,
+                    "media.status":
+                        "skipped",
+
+                    "media.storageKey":
+                        null,
                 }
             );
 
@@ -503,7 +670,8 @@ async function processMedia(
         await updateMediaStatus(
             dbMessage._id,
             {
-                "media.status": "uploading",
+                "media.status":
+                    "uploading",
             }
         );
 
@@ -518,17 +686,23 @@ async function processMedia(
             );
 
         /*
-         * Final size check after downloading.
+         * Final size check after download.
          */
         if (
-            stats.size > MAX_MEDIA_SIZE
+            stats.size >
+            MAX_MEDIA_SIZE
         ) {
             await updateMediaStatus(
                 dbMessage._id,
                 {
-                    "media.status": "skipped",
-                    "media.size": stats.size,
-                    "media.storageKey": null,
+                    "media.status":
+                        "skipped",
+
+                    "media.size":
+                        stats.size,
+
+                    "media.storageKey":
+                        null,
                 }
             );
 
@@ -538,18 +712,25 @@ async function processMedia(
         }
 
         /*
-         * Never allow WebM to reach the B2 uploader.
+         * Never allow WebM to reach B2.
          */
         if (
-            path.extname(filePath)
-                .toLowerCase() === ".webm"
+            path.extname(
+                filePath
+            ).toLowerCase() ===
+            ".webm"
         ) {
             await updateMediaStatus(
                 dbMessage._id,
                 {
-                    "media.status": "skipped",
-                    "media.size": stats.size,
-                    "media.storageKey": null,
+                    "media.status":
+                        "skipped",
+
+                    "media.size":
+                        stats.size,
+
+                    "media.storageKey":
+                        null,
                 }
             );
 
@@ -567,7 +748,6 @@ async function processMedia(
         const key =
             buildStorageKey(
                 dbMessage,
-                media,
                 extension
             );
 
@@ -575,16 +755,24 @@ async function processMedia(
             key,
             filePath,
             contentType,
-            size: stats.size,
+            size:
+                stats.size,
         });
 
         await updateMediaStatus(
             dbMessage._id,
             {
-                "media.storageKey": key,
-                "media.size": stats.size,
-                "media.status": "uploaded",
-                "media.mimeType": contentType,
+                "media.storageKey":
+                    key,
+
+                "media.size":
+                    stats.size,
+
+                "media.status":
+                    "uploaded",
+
+                "media.mimeType":
+                    contentType,
             }
         );
 
@@ -597,16 +785,20 @@ async function processMedia(
             await updateMediaStatus(
                 dbMessage._id,
                 {
-                    "media.status": "failed",
+                    "media.status":
+                        "failed",
                 }
             );
         } catch {
-            // Do not create extra logs for a secondary DB error.
+            // Ignore secondary DB errors.
         }
 
         return {
             status: "failed",
-            error: error?.message || "Unknown error",
+
+            error:
+                error?.message ||
+                "Unknown error",
         };
 
     } finally {
@@ -635,11 +827,9 @@ async function processMedia(
 
 async function processMediaConcurrently(
     client,
+    entityCache,
     messages
 ) {
-    const entityCache =
-        new Map();
-
     let nextIndex = 0;
     let completed = 0;
     let uploaded = 0;
@@ -653,7 +843,10 @@ async function processMediaConcurrently(
             const index =
                 nextIndex++;
 
-            if (index >= messages.length) {
+            if (
+                index >=
+                messages.length
+            ) {
                 return;
             }
 
@@ -666,15 +859,27 @@ async function processMediaConcurrently(
 
             completed++;
 
-            if (result.status === "uploaded") {
+            if (
+                result.status ===
+                "uploaded"
+            ) {
                 uploaded++;
-            } else if (result.status === "skipped") {
+
+            } else if (
+                result.status ===
+                "skipped"
+            ) {
                 skipped++;
-            } else if (result.status === "failed") {
+
+            } else if (
+                result.status ===
+                "failed"
+            ) {
                 failed++;
 
                 if (
-                    failureSamples.length < 5
+                    failureSamples.length <
+                    5
                 ) {
                     failureSamples.push(
                         `${messages[index].chatId}/${messages[index].telegramId}: ${result.error}`
@@ -683,7 +888,9 @@ async function processMediaConcurrently(
             }
 
             if (
-                completed % LOG_PROGRESS_EVERY === 0
+                completed %
+                    LOG_PROGRESS_EVERY ===
+                0
             ) {
                 console.log(
                     `Media progress ${completed}/${messages.length} | ` +
@@ -696,21 +903,29 @@ async function processMediaConcurrently(
     const workers =
         Array.from(
             {
-                length: Math.min(
-                    MEDIA_CONCURRENCY,
-                    messages.length
-                ),
+                length:
+                    Math.min(
+                        MEDIA_CONCURRENCY,
+                        messages.length
+                    ),
             },
             () => worker()
         );
 
-    await Promise.all(workers);
+    await Promise.all(
+        workers
+    );
 
     return {
-        total: messages.length,
+        total:
+            messages.length,
+
         uploaded,
+
         skipped,
+
         failed,
+
         failureSamples,
     };
 }
@@ -723,11 +938,23 @@ async function processMediaConcurrently(
 */
 
 async function main() {
+    let client = null;
+
     try {
         await connectToDatabase();
 
-        const client =
+        client =
             await getTelegramClient();
+
+        /*
+         * IMPORTANT:
+         * Populate Telegram's entity cache before
+         * trying to fetch individual messages.
+         */
+        const entityCache =
+            await loadPrivateEntities(
+                client
+            );
 
         const messages =
             await Message.find({
@@ -738,6 +965,7 @@ async function main() {
                         "voice",
                     ],
                 },
+
                 "media.status": {
                     $in: [
                         "pending",
@@ -750,7 +978,9 @@ async function main() {
                 })
                 .lean();
 
-        if (messages.length === 0) {
+        if (
+            messages.length === 0
+        ) {
             console.log(
                 "Media archive: nothing to upload."
             );
@@ -765,19 +995,24 @@ async function main() {
         const result =
             await processMediaConcurrently(
                 client,
+                entityCache,
                 messages
             );
 
         console.log(
-            `Media archive completed | total=${result.total} uploaded=${result.uploaded} skipped=${result.skipped} failed=${result.failed}`
+            `Media archive completed | ` +
+            `total=${result.total} ` +
+            `uploaded=${result.uploaded} ` +
+            `skipped=${result.skipped} ` +
+            `failed=${result.failed}`
         );
 
         /*
-         * Print only a maximum of 5 failure samples,
-         * instead of one log per failed file.
+         * Print only a maximum of 5 failure samples.
          */
         if (
-            result.failureSamples.length > 0
+            result.failureSamples.length >
+            0
         ) {
             console.error(
                 `Media failure samples: ${result.failureSamples.join(" | ")}`
@@ -786,12 +1021,24 @@ async function main() {
 
     } catch (error) {
         console.error(
-            `Media archive fatal error: ${error?.message || error}`
+            `Media archive fatal error: ${
+                error?.message || error
+            }`
         );
 
         process.exitCode = 1;
+
+    } finally {
+        if (client) {
+            try {
+                await client.disconnect();
+            } catch {
+                // Ignore disconnect errors.
+            }
+        }
     }
 }
 
 
 main();
+```
