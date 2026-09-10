@@ -17,10 +17,6 @@ const Message =
     require("./database/models/Message");
 
 
-const INITIAL_ARCHIVE_DAYS = Number(
-    process.env.INITIAL_ARCHIVE_DAYS || 730
-);
-
 const MESSAGE_BATCH_SIZE = Math.min(
     Number(process.env.MESSAGE_BATCH_SIZE || 100),
     100
@@ -42,18 +38,6 @@ const sleep = (ms) =>
     new Promise((resolve) => {
         setTimeout(resolve, ms);
     });
-
-
-function getHistoryStartDate() {
-    const date = new Date();
-
-    date.setUTCDate(
-        date.getUTCDate() -
-        INITIAL_ARCHIVE_DAYS
-    );
-
-    return date;
-}
 
 
 function getMessageDate(message) {
@@ -627,17 +611,72 @@ async function getMessagesWithRetry(
 
 
 /**
- * Archive all messages newer than
- * the newest message already stored
- * in MongoDB.
+ * Initialize a brand-new chat
+ * without downloading its old history.
  *
- * IMPORTANT:
- * MongoDB is the source of truth
- * for the incremental archive.
+ * If MongoDB has no message for this
+ * chat and the cursor is also empty,
+ * the latest Telegram message becomes
+ * the starting point.
  *
- * lastArchivedMessageId is only a
- * progress cursor and must NEVER be
- * allowed to skip messages.
+ * This prevents a newly discovered
+ * chat from causing a full historical
+ * download.
+ */
+async function initializeNewChatCursor(
+    client,
+    entity,
+    chat
+) {
+    const messages =
+        await getMessagesWithRetry(
+            client,
+            entity,
+            {
+                limit: 1,
+            }
+        );
+
+    if (!messages?.length) {
+        return 0;
+    }
+
+    const latestMessageId =
+        Number(
+            messages[0]?.id || 0
+        );
+
+    if (
+        !Number.isFinite(
+            latestMessageId
+        ) ||
+        latestMessageId <= 0
+    ) {
+        return 0;
+    }
+
+    await Chat.updateOne(
+        {
+            _id: chat._id,
+        },
+        {
+            $max: {
+                lastArchivedMessageId:
+                    latestMessageId,
+            },
+        }
+    );
+
+    return latestMessageId;
+}
+
+
+/**
+ * Archive only messages that are
+ * newer than the newest message
+ * already stored in MongoDB.
+ *
+ * No historical backfill is performed.
  */
 async function archiveNewMessages(
     client,
@@ -650,21 +689,6 @@ async function archiveNewMessages(
             chat.telegramId
         );
 
-    let offsetId = 0;
-
-    /**
-     * MongoDB is authoritative here.
-     *
-     * We intentionally do NOT use:
-     *
-     * Math.max(
-     *     mongoNewestId,
-     *     cursorId
-     * )
-     *
-     * because a stale or incorrect
-     * cursor must never cause a gap.
-     */
     const mongoNewestId =
         Number(
             state.newest?.telegramId || 0
@@ -675,8 +699,48 @@ async function archiveNewMessages(
             chat.lastArchivedMessageId || 0
         );
 
+    /**
+     * Brand-new chat:
+     *
+     * Do NOT download the entire
+     * Telegram history.
+     *
+     * Just establish the current
+     * latest message as the baseline.
+     */
+    if (
+        mongoNewestId <= 0 &&
+        cursorId <= 0
+    ) {
+        await initializeNewChatCursor(
+            client,
+            entity,
+            chat
+        );
+
+        return {
+            inserted: 0,
+            existing: 0,
+            media: 0,
+            webm: 0,
+            stickers: 0,
+            animations: 0,
+            large: 0,
+        };
+    }
+
+    /**
+     * MongoDB is the source of truth
+     * whenever messages already exist.
+     *
+     * The cursor is only a progress
+     * marker and must never make us
+     * skip messages.
+     */
     const minId =
         mongoNewestId;
+
+    let offsetId = 0;
 
     let inserted = 0;
     let existing = 0;
@@ -846,302 +910,30 @@ async function archiveNewMessages(
 
 
 /**
- * FULL historical backfill.
- *
- * This is deliberately independent
- * from:
- *
- * - lastArchivedMessageId
- * - newest MongoDB message
- * - number of recent messages
- *
- * The completion condition is:
- *
- * oldest stored message <= targetDate
- *
- * Otherwise Telegram is scanned
- * backwards.
- */
-async function archiveOldHistory(
-    client,
-    entity,
-    chat,
-    meId,
-    targetDate
-) {
-    const state =
-        await getChatMessageState(
-            chat.telegramId
-        );
-
-    /**
-     * The chat is complete ONLY
-     * if the oldest stored message
-     * reaches the requested date.
-     */
-    if (
-        state.oldest?.date &&
-        state.oldest.date <=
-            targetDate
-    ) {
-        return {
-            inserted: 0,
-            existing: 0,
-            media: 0,
-            webm: 0,
-            stickers: 0,
-            animations: 0,
-            large: 0,
-            completed: true,
-            scannedBatches: 0,
-        };
-    }
-
-    let offsetId = 0;
-
-    let inserted = 0;
-    let existing = 0;
-    let media = 0;
-    let webm = 0;
-    let stickers = 0;
-    let animations = 0;
-    let large = 0;
-
-    let scannedBatches = 0;
-
-    let reachedTarget =
-        false;
-
-    while (
-        !reachedTarget
-    ) {
-        const messages =
-            await getMessagesWithRetry(
-                client,
-                entity,
-                {
-                    limit:
-                        MESSAGE_BATCH_SIZE,
-
-                    offsetId,
-                }
-            );
-
-        scannedBatches++;
-
-        if (
-            !messages?.length
-        ) {
-            break;
-        }
-
-        const eligibleMessages =
-            [];
-
-        for (
-            const message
-            of messages
-        ) {
-            const date =
-                getMessageDate(
-                    message
-                );
-
-            if (!date) {
-                continue;
-            }
-
-            /**
-             * Keep messages inside
-             * the requested historical
-             * range.
-             */
-            if (
-                date >= targetDate
-            ) {
-                eligibleMessages.push(
-                    message
-                );
-            }
-
-            /**
-             * Once Telegram reaches
-             * the requested boundary,
-             * the required history has
-             * been scanned.
-             */
-            if (
-                date <= targetDate
-            ) {
-                reachedTarget =
-                    true;
-            }
-        }
-
-        if (
-            eligibleMessages.length >
-            0
-        ) {
-            const result =
-                await saveMessages(
-                    eligibleMessages,
-                    chat.telegramId,
-                    meId
-                );
-
-            inserted +=
-                result.inserted;
-
-            existing +=
-                result.existing;
-
-            media +=
-                result.media;
-
-            webm +=
-                result.webm;
-
-            stickers +=
-                result.stickers;
-
-            animations +=
-                result.animations;
-
-            large +=
-                result.large;
-        }
-
-        /**
-         * Stop immediately once
-         * targetDate has been reached.
-         */
-        if (reachedTarget) {
-            break;
-        }
-
-        /**
-         * Telegram returns:
-         *
-         * newest -> oldest
-         *
-         * Therefore the last
-         * message is the oldest
-         * message in this batch.
-         */
-        const oldestMessage =
-            messages[
-                messages.length - 1
-            ];
-
-        const nextOffsetId =
-            Number(
-                oldestMessage?.id
-            );
-
-        if (
-            !Number.isFinite(
-                nextOffsetId
-            ) ||
-            nextOffsetId <= 0
-        ) {
-            break;
-        }
-
-        /**
-         * Safety guard against
-         * pagination loops.
-         */
-        if (
-            offsetId !== 0 &&
-            nextOffsetId >=
-                offsetId
-        ) {
-            break;
-        }
-
-        offsetId =
-            nextOffsetId;
-
-        if (
-            messages.length <
-            MESSAGE_BATCH_SIZE
-        ) {
-            break;
-        }
-    }
-
-    /**
-     * Verify actual database state
-     * after historical backfill.
-     *
-     * We do NOT trust the number
-     * of inserted messages as the
-     * completion criterion.
-     */
-    const finalState =
-        await getChatMessageState(
-            chat.telegramId
-        );
-
-    const completed =
-        Boolean(
-            finalState.oldest?.date &&
-            finalState.oldest.date <=
-                targetDate
-        );
-
-    return {
-        inserted,
-        existing,
-        media,
-        webm,
-        stickers,
-        animations,
-        large,
-        completed,
-        scannedBatches,
-    };
-}
-
-
-/**
  * Archive one chat.
+ *
+ * IMPORTANT:
+ *
+ * There is intentionally NO
+ * historical archive here.
  */
 async function archiveChat(
     client,
     entity,
     chat,
-    meId,
-    targetDate
+    meId
 ) {
-    const newResult =
-        await archiveNewMessages(
-            client,
-            entity,
-            chat,
-            meId
-        );
-
-    const historyResult =
-        await archiveOldHistory(
-            client,
-            entity,
-            chat,
-            meId,
-            targetDate
-        );
-
-    return {
-        newResult,
-        historyResult,
-    };
+    return await archiveNewMessages(
+        client,
+        entity,
+        chat,
+        meId
+    );
 }
 
 
 async function main() {
     /**
-     * FIX:
-     *
      * mongodb.js exports:
      *
      * {
@@ -1158,9 +950,6 @@ async function main() {
 
     const meId =
         String(me.id);
-
-    const targetDate =
-        getHistoryStartDate();
 
     /**
      * Get Telegram dialogs once.
@@ -1278,7 +1067,7 @@ async function main() {
         }).lean();
 
     console.log(
-        `Message archive | chats=${chats.length} history=${INITIAL_ARCHIVE_DAYS}d`
+        `Message archive | chats=${chats.length} mode=new-only`
     );
 
     let totalInserted = 0;
@@ -1290,8 +1079,6 @@ async function main() {
     let totalAnimations = 0;
     let totalLarge = 0;
 
-    let completedHistory = 0;
-    let incompleteHistory = 0;
     let failedChats = 0;
 
     for (
@@ -1312,6 +1099,11 @@ async function main() {
          */
         if (!entity) {
             failedChats++;
+
+            console.error(
+                `Chat failed | chat=${chat.telegramId} | Telegram entity not found`
+            );
+
             continue;
         }
 
@@ -1321,46 +1113,29 @@ async function main() {
                     client,
                     entity,
                     chat,
-                    meId,
-                    targetDate
+                    meId
                 );
 
             totalInserted +=
-                result.newResult.inserted +
-                result.historyResult.inserted;
+                result.inserted;
 
             totalExisting +=
-                result.newResult.existing +
-                result.historyResult.existing;
+                result.existing;
 
             totalMedia +=
-                result.newResult.media +
-                result.historyResult.media;
+                result.media;
 
             totalWebm +=
-                result.newResult.webm +
-                result.historyResult.webm;
+                result.webm;
 
             totalStickers +=
-                result.newResult.stickers +
-                result.historyResult.stickers;
+                result.stickers;
 
             totalAnimations +=
-                result.newResult.animations +
-                result.historyResult.animations;
+                result.animations;
 
             totalLarge +=
-                result.newResult.large +
-                result.historyResult.large;
-
-            if (
-                result.historyResult
-                    .completed
-            ) {
-                completedHistory++;
-            } else {
-                incompleteHistory++;
-            }
+                result.large;
         } catch (error) {
             failedChats++;
 
@@ -1388,10 +1163,6 @@ async function main() {
 
             `large=${totalLarge}`,
 
-            `historyComplete=${completedHistory}`,
-
-            `historyIncomplete=${incompleteHistory}`,
-
             `failedChats=${failedChats}`,
         ].join(" | ")
     );
@@ -1403,13 +1174,10 @@ async function main() {
     /**
      * Railway / parent process
      * receives a failed exit code
-     * if any chat failed or its
-     * requested history was not
-     * completed.
+     * only if a chat actually failed.
      */
     if (
-        failedChats > 0 ||
-        incompleteHistory > 0
+        failedChats > 0
     ) {
         process.exitCode = 1;
     }
